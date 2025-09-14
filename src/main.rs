@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use toml::Value;
+use std::collections::HashSet;
 use anyhow::{Context, Result};
 
 fn main() {
@@ -13,23 +14,52 @@ fn main() {
     }
 }
 
-/// Find all built executables from workspace members or single package
+/// Extract candidate binary names from a manifest `Value`.
+/// Prefers `[[bin]].name`; falls back to `package.name` if no explicit bins.
+fn manifest_bin_names(manifest: &Value) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Some(bins) = manifest.get("bin").and_then(|v| v.as_array()) {
+        for b in bins {
+            if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+                names.push(name.to_string());
+            } else if let Some(path) = b.get("path").and_then(|p| p.as_str()) {
+                if let Some(stem) = Path::new(path).file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        if let Some(name) = manifest.get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str()) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Find all built executables from workspace members or single package.
+/// Returns the base names of executables (without `.exe`).
 fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<String>> {
-    let mut package_names = Vec::new();
-    
-    // Check if this is a workspace
+    let release_dir = project_dir.join("target").join("release");
+    let mut candidate_names: HashSet<String> = HashSet::new();
+
+    // Root package (if any)
+    for name in manifest_bin_names(cargo_data) {
+        candidate_names.insert(name);
+    }
+
+    // Workspace members (if any)
     if let Some(workspace) = cargo_data.get("workspace") {
         if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
-            // Parse workspace members
             for member in members {
                 if let Some(member_path) = member.as_str() {
-                    let member_cargo = project_dir.join(member_path).join("Cargo.toml");
-                    if let Ok(contents) = fs::read_to_string(&member_cargo) {
+                    let member_manifest_path = project_dir.join(member_path).join("Cargo.toml");
+                    if let Ok(contents) = fs::read_to_string(&member_manifest_path) {
                         if let Ok(member_data) = toml::from_str::<Value>(&contents) {
-                            if let Some(name) = member_data.get("package")
-                                .and_then(|p| p.get("name"))
-                                .and_then(|n| n.as_str()) {
-                                package_names.push(name.to_string());
+                            for name in manifest_bin_names(&member_data) {
+                                candidate_names.insert(name);
                             }
                         }
                     }
@@ -37,34 +67,19 @@ fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<
             }
         }
     }
-    
-    // Also check if root has a package (mixed workspace+package)
-    if let Some(name) = cargo_data.get("package")
-        .and_then(|p| p.get("name"))
-        .and_then(|n| n.as_str()) {
-        package_names.push(name.to_string());
+
+    if candidate_names.is_empty() {
+        anyhow::bail!("No packages or bins found in Cargo.toml");
     }
-    
-    if package_names.is_empty() {
-        anyhow::bail!("No packages found in Cargo.toml");
-    }
-    
-    // Filter to only packages with existing release executables
-    let release_dir = project_dir.join("target").join("release");
+
+    // Filter to only candidates with existing release executables
     let mut built_executables = Vec::new();
-    
-    for package_name in package_names {
-        let exe_name = if cfg!(windows) {
-            format!("{}.exe", package_name)
-        } else {
-            package_name.clone()
-        };
-        
+    for base in candidate_names {
+        let exe_name = if cfg!(windows) { format!("{}.exe", base) } else { base.clone() };
         if release_dir.join(&exe_name).exists() {
-            built_executables.push(package_name);
+            built_executables.push(base);
         }
     }
-    
     Ok(built_executables)
 }
 
@@ -169,6 +184,53 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("No built release executables found"), 
             "Expected error message containing 'No built release executables found', got: {}", err);
+    }
+
+    #[test]
+    fn test_single_package_custom_bin_name() {
+        let temp_dir = tempdir().unwrap();
+
+        // Single package with explicit [[bin]] name different from package name
+        create_and_write_file(&temp_dir.path().join("Cargo.toml"),
+            "[package]\nname=\"mddskmgr\"\nversion=\"0.1.0\"\n\n[[bin]]\nname=\"mddsklbl\"\npath=\"src/main.rs\"").unwrap();
+
+        // Create release dir and only the custom-named binary
+        let release_dir = temp_dir.path().join("target").join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        let exe_custom = if cfg!(windows) { "mddsklbl.exe" } else { "mddsklbl" };
+        create_and_write_file(&release_dir.join(exe_custom), "fake exe").unwrap();
+
+        let cargo_data: Value = toml::from_str(
+            "[package]\nname=\"mddskmgr\"\nversion=\"0.1.0\"\n\n[[bin]]\nname=\"mddsklbl\"\npath=\"src/main.rs\""
+        ).unwrap();
+
+        let bins = find_built_executables(temp_dir.path(), &cargo_data).unwrap();
+        assert_eq!(bins, vec!["mddsklbl".to_string()]);
+    }
+
+    #[test]
+    fn test_workspace_member_custom_bin_name() {
+        let temp_dir = tempdir().unwrap();
+
+        // Workspace with one member whose [[bin]] has a custom name
+        create_and_write_file(&temp_dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers=[\"member\"]").unwrap();
+
+        // Member manifest
+        fs::create_dir_all(temp_dir.path().join("member")).unwrap();
+        create_and_write_file(&temp_dir.path().join("member").join("Cargo.toml"),
+            "[package]\nname=\"mddskmgr\"\nversion=\"0.1.0\"\n\n[[bin]]\nname=\"mddsklbl\"\npath=\"src/main.rs\""
+        ).unwrap();
+
+        // Release dir with custom-named binary
+        let release_dir = temp_dir.path().join("target").join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        let exe_custom = if cfg!(windows) { "mddsklbl.exe" } else { "mddsklbl" };
+        create_and_write_file(&release_dir.join(exe_custom), "fake exe").unwrap();
+
+        let cargo_data: Value = toml::from_str("[workspace]\nmembers=[\"member\"]").unwrap();
+        let bins = find_built_executables(temp_dir.path(), &cargo_data).unwrap();
+        assert_eq!(bins, vec!["mddsklbl".to_string()]);
     }
 
     #[test]
