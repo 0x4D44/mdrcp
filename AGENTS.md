@@ -1,43 +1,34 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Expected layout:
-  - `src/` core libraries and shared utilities.
-  - `apps/` runnable services/CLIs; thin wrappers around `src`.
-  - `tests/` unit and integration tests mirroring `src` paths.
-  - `assets/` fixtures, sample data, and static files.
-  - `scripts/` local dev tasks (`*.ps1` Windows, `*.sh` Unix).
-- Keep modules small; group by feature (e.g., `src/parser/`, `src/io/`, `src/cli/`).
+- `src/` Rust binary crate for the CLI (entry: `src/main.rs`).
+- Prefer small, focused modules; as code grows, extract `src/lib.rs` and group by feature (e.g., `src/cli/`, `src/io/`, `src/deploy/`).
+- `tests/` for integration tests mirroring `src` paths; unit tests live beside code with `#[cfg(test)]`.
+- `assets/` optional fixtures or sample project structures for tests.
 
 ## Build, Test, and Development Commands
-- Prefer script wrappers first:
-  - `./scripts/setup.(ps1|sh)` install toolchains and deps.
-  - `./scripts/dev.(ps1|sh)` run the main app with auto‑reload.
-  - `./scripts/test.(ps1|sh)` run the test suite with coverage.
-  - `./scripts/lint.(ps1|sh)` format + static checks.
-- If wrappers are absent, use stack defaults:
-  - Node: `npm ci`, `npm test`, `npm run build`, `npm run dev`
-  - Python: `python -m venv .venv; . .venv/Scripts/Activate.ps1; pip install -e .[dev]; pytest -q`
-  - Rust: `cargo build --release; cargo test`
+- `cargo build` / `cargo build --release` compile the binary.
+- `cargo run -- [args]` runs the tool in the current directory.
+- `cargo test` runs unit and integration tests.
+- `cargo fmt --all` formats; `cargo clippy --all-targets -- -D warnings` lints.
+
+What the tool does: run it inside a Rust project directory after a release build to copy found release executables to `c:\apps` on Windows, or to `~/.local/bin` on Linux/macOS (non‑Windows names omit `.exe`).
 
 ## Coding Style & Naming Conventions
-- Indentation: 2 spaces (JS/TS), 4 spaces (Python), default (Rust/Go).
-- Max line length 100; wrap thoughtfully.
-- Names: `snake_case` files and functions; `PascalCase` types/classes; `kebab-case` CLI names.
-- Use formatters: Prettier (JS/TS), Black + Ruff (Python), rustfmt + clippy (Rust).
+- Rust 2021; keep lines ≤100 chars and functions short.
+- Names: modules/files `snake_case`; types `PascalCase`; CLI flags `kebab-case`.
+- Enforce style with rustfmt and clippy; treat clippy warnings as errors.
 
 ## Testing Guidelines
-- Place tests in `tests/` with names like `test_<module>_<behavior>.py|ts|rs`.
-- Aim for ≥80% coverage on changed code.
-- Prefer fast, isolated unit tests; use fixtures for I/O; mark slow/integration.
+- Add fast unit tests per function; keep I/O behind small helpers.
+- Use `tempfile` for filesystem tests; avoid touching real user paths.
+- Name tests `test_<area>_<behavior>()`. Target ≥80% coverage on changed code.
 
 ## Commit & Pull Request Guidelines
 - Conventional Commits: `feat|fix|docs|refactor|test|build|ci|chore(scope): summary`.
-  - Example: `feat(parser): support fenced code blocks`.
-- PRs: concise description, link issues, include tests and docs updates, add screenshots for UI, pass CI.
+- Example: `feat(deploy): copy release binaries to c:\apps`.
+- PRs: clear description, link issues, include tests/docs, and pass `cargo fmt` + `clippy`.
 
 ## Security & Configuration Tips
-- Do not commit secrets; use `.env.example`.
-- Validate inputs; avoid panics/exceptions leaking stack traces in CLIs.
-- Keep dependencies minimal; run `scripts/audit.(ps1|sh)` or stack equivalents regularly.
-
+- Do not commit secrets; prefer config via env or flags.
+- Be cautious with paths: the deploy target is `c:\apps`; confirm OS suitability or add a configurable target in changes.
