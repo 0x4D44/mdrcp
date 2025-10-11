@@ -42,12 +42,12 @@ fn manifest_bin_names(manifest: &Value) -> Vec<String> {
             }
         }
     }
-    if names.is_empty() {
-        if let Some(name) = manifest
-            .get("package")
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
-        {
+    if let Some(name) = manifest
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+    {
+        if !names.iter().any(|existing| existing == name) {
             names.push(name.to_string());
         }
     }
@@ -269,6 +269,34 @@ mod tests {
 
         let bins = find_built_executables(temp_dir.path(), &cargo_data).unwrap();
         assert_eq!(bins, vec!["mddsklbl".to_string()]);
+    }
+
+    #[test]
+    fn test_single_package_default_and_custom_bin() {
+        let temp_dir = tempdir().unwrap();
+
+        let manifest = "[package]\nname=\"demo\"\nversion=\"0.1.0\"\n\n[[bin]]\nname=\"demo-tool\"\npath=\"src/bin/demo.rs\"";
+        create_and_write_file(&temp_dir.path().join("Cargo.toml"), manifest).unwrap();
+
+        let release_dir = temp_dir.path().join("target").join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+
+        let default_exe = if cfg!(windows) { "demo.exe" } else { "demo" };
+        let custom_exe = if cfg!(windows) {
+            "demo-tool.exe"
+        } else {
+            "demo-tool"
+        };
+
+        create_and_write_file(&release_dir.join(default_exe), "fake exe").unwrap();
+        create_and_write_file(&release_dir.join(custom_exe), "fake exe").unwrap();
+
+        let cargo_data: Value = toml::from_str(manifest).unwrap();
+        let executables = find_built_executables(temp_dir.path(), &cargo_data).unwrap();
+
+        assert_eq!(executables.len(), 2);
+        assert!(executables.contains(&"demo".to_string()));
+        assert!(executables.contains(&"demo-tool".to_string()));
     }
 
     #[test]
