@@ -1,0 +1,200 @@
+     1	use anyhow::{Context, Result};
+     2	use std::collections::HashSet;
+     3	use std::fs;
+     4	use std::path::{Path, PathBuf};
+     5	use std::process;
+     6	use toml::Value;
+     7	
+     8	#[cfg(windows)]
+     9	fn exe_filename(base: &str) -> String {
+    10	    format!("{}.exe", base)
+    11	}
+    12	
+    13	#[cfg(not(windows))]
+    14	fn exe_filename(base: &str) -> String {
+    15	    base.to_string()
+    16	}
+    17	
+    18	#[cfg(windows)]
+    19	const HINT_DEFAULT: &str = r"c:\\apps";
+    20	
+    21	#[cfg(not(windows))]
+    22	const HINT_DEFAULT: &str = "~/.local/bin";
+    23	
+    24	fn do_main(cwd: &Path) -> i32 {
+    25	    match run(cwd) {
+    26	        Ok(()) => 0,
+    27	        Err(e) => {
+    28	            eprintln!("Error: {}", e);
+    29	            eprintln!("\nUsage: deploy-tool");
+    30	            let hint = match default_target_dir() {
+    31	                Ok(p) => p.display().to_string(),
+    32	                Err(_) => HINT_DEFAULT.to_string(),
+    33	            };
+    34	            eprintln!(
+    35	                "Run this tool in a Rust project directory to copy release executables to {}",
+    36	                hint
+    37	            );
+    38	            1
+    39	        }
+    40	    }
+    41	}
+    42	
+    43	fn main() {
+    44	    process::exit(do_main(Path::new(".")));
+    45	}
+    46	
+    47	/// Extract candidate binary names from a manifest `Value`.
+    48	/// Prefers `[[bin]].name`; falls back to `package.name` if no explicit bins.
+    49	fn manifest_bin_names(manifest: &Value) -> Vec<String> {
+    50	    let mut names: Vec<String> = Vec::new();
+    51	    if let Some(bins) = manifest.get("bin").and_then(|v| v.as_array()) {
+    52	        for b in bins {
+    53	            if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+    54	                names.push(name.to_string());
+    55	            } else if let Some(path) = b.get("path").and_then(|p| p.as_str()) {
+    56	                if let Some(stem) = Path::new(path).file_stem().and_then(|s| s.to_str()) {
+    57	                    names.push(stem.to_string());
+    58	                }
+    59	            }
+    60	        }
+    61	    }
+    62	    if let Some(name) = manifest
+    63	        .get("package")
+    64	        .and_then(|p| p.get("name"))
+    65	        .and_then(|n| n.as_str())
+    66	    {
+    67	        if !names.iter().any(|existing| existing == name) {
+    68	            names.push(name.to_string());
+    69	        }
+    70	    }
+    71	    names
+    72	}
+    73	
+    74	/// Find all built executables from workspace members or single package.
+    75	/// Returns the base names of executables (without `.exe`).
+    76	fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<String>> {
+    77	    let release_dir = project_dir.join("target").join("release");
+    78	    let mut candidate_names: HashSet<String> = HashSet::new();
+    79	
+    80	    // Root package (if any)
+    81	    for name in manifest_bin_names(cargo_data) {
+    82	        candidate_names.insert(name);
+    83	    }
+    84	
+    85	    // Workspace members (if any)
+    86	    if let Some(workspace) = cargo_data.get("workspace") {
+    87	        if let Some(members) = workspace.get("members").and_then(|m| m.as_array()) {
+    88	            for member in members {
+    89	                if let Some(member_path) = member.as_str() {
+    90	                    let member_manifest_path = project_dir.join(member_path).join("Cargo.toml");
+    91	                    if let Ok(contents) = fs::read_to_string(&member_manifest_path) {
+    92	                        if let Ok(member_data) = toml::from_str::<Value>(&contents) {
+    93	                            for name in manifest_bin_names(&member_data) {
+    94	                                candidate_names.insert(name);
+    95	                            }
+    96	                        }
+    97	                    }
+    98	                }
+    99	            }
+   100	        }
+   101	    }
+   102	
+   103	    if candidate_names.is_empty() {
+   104	        anyhow::bail!("No packages or bins found in Cargo.toml");
+   105	    }
+   106	
+   107	    // Filter to only candidates with existing release executables
+   108	    let mut built_executables = Vec::new();
+   109	    for base in candidate_names {
+   110	        let exe_name = exe_filename(&base);
+   111	        if release_dir.join(&exe_name).exists() {
+   112	            built_executables.push(base);
+   113	        }
+   114	    }
+   115	    Ok(built_executables)
+   116	}
+   117	
+   118	/// Determine the default deployment target directory per-OS.
+   119	#[cfg(windows)]
+   120	fn default_target_dir() -> Result<PathBuf> {
+   121	    Ok(PathBuf::from(r"c:\\apps"))
+   122	}
+   123	
+   124	#[cfg(not(windows))]
+   125	fn default_target_dir() -> Result<PathBuf> {
+   126	    let home = std::env::var_os("HOME")
+   127	        .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot determine ~/.local/bin"))?;
+   128	    Ok(Path::new(&home).join(".local").join("bin"))
+   129	}
+   130	
+   131	/// Main deployment function that handles both single packages and workspaces
+   132	fn run(project_dir: &Path) -> Result<()> {
+   133	    let cargo_path = project_dir.join("Cargo.toml");
+   134	    if !cargo_path.exists() {
+   135	        anyhow::bail!("No Cargo.toml found. Please run this tool in a Rust project directory");
+   136	    }
+   137	
+   138	    let cargo_contents = fs::read_to_string(&cargo_path).context("Failed to read Cargo.toml")?;
+   139	
+   140	    let cargo_data: Value =
+   141	        toml::from_str(&cargo_contents).context("Failed to parse Cargo.toml")?;
+   142	
+   143	    let built_executables = find_built_executables(project_dir, &cargo_data)?;
+   144	
+   145	    if built_executables.is_empty() {
+   146	        anyhow::bail!("No built release executables found. Have you run 'cargo build --release'?");
+   147	    }
+   148	
+   149	    let target_dir = default_target_dir()?;
+   150	    if !target_dir.exists() {
+   151	        fs::create_dir_all(&target_dir).with_context(|| {
+   152	            format!("Failed to create target directory {}", target_dir.display())
+   153	        })?;
+   154	    }
+   155	
+   156	    let mut copied_count = 0;
+   157	    for package_name in built_executables {
+   158	        let exe_name = exe_filename(&package_name);
+   159	
+   160	        let source_path = project_dir.join("target").join("release").join(&exe_name);
+   161	        let target_path = target_dir.join(&exe_name);
+   162	
+   163	        fs::copy(&source_path, &target_path).with_context(|| {
+   164	            format!(
+   165	                "Failed to copy {} to {}",
+   166	                source_path.display(),
+   167	                target_path.display()
+   168	            )
+   169	        })?;
+   170	
+   171	        println!(
+   172	            "Successfully copied {} to {}",
+   173	            exe_name,
+   174	            target_path.display()
+   175	        );
+   176	        copied_count += 1;
+   177	    }
+   178	
+   179	    println!(
+   180	        "\nDeployed {} executable(s) to {}",
+   181	        copied_count,
+   182	        target_dir.display()
+   183	    );
+   184	    Ok(())
+   185	}
+   186	
+   187	#[cfg(test)]
+   188	mod tests {
+   189	    use super::*;
+   190	    use std::fs::File;
+   191	    use std::io::Write;
+   192	    use tempfile::tempdir;
+   193	    use std::sync::{Mutex, OnceLock};
+   194	
+   195	    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+   196	
+   197	    fn create_and_write_file(path: &Path, contents: &str) -> std::io::Result<()> {
+   198	        let mut file = File::create(path)?;
+   199	        file.write_all(contents.as_bytes())?;
+   200	        file.flush()?;
