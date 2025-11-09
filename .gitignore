@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target/
+
+# Cargo.lock should be committed for binaries
+# but is already in the repo, so leaving as-is
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.pdb
