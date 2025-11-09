@@ -12,17 +12,12 @@ pub use cli::{
     parse_args, print_help, print_parse_error, print_version_banner, Command, ParseError,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SummaryFormat {
+    #[default]
     Text,
     Json,
     JsonPretty,
-}
-
-impl Default for SummaryFormat {
-    fn default() -> Self {
-        SummaryFormat::Text
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -112,7 +107,14 @@ struct DeploymentSummary {
     target_dir: String,
     override_used: bool,
     copied_binaries: Vec<String>,
+    failed_binaries: Vec<FailedCopy>,
     warnings: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct FailedCopy {
+    binary: String,
+    error: String,
 }
 
 pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
@@ -298,30 +300,48 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
 
     let mut copied_count = 0;
     let mut copied_binaries: Vec<String> = Vec::new();
+    let mut failed_binaries: Vec<FailedCopy> = Vec::new();
+
     for package_name in built_executables {
         let exe_name = exe_filename(&package_name);
 
         let source_path = project_dir.join("target").join("release").join(&exe_name);
         let target_path = target_dir.join(&exe_name);
 
-        fs::copy(&source_path, &target_path).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                source_path.display(),
-                target_path.display()
-            )
-        })?;
-
-        if emit_text {
-            println!(
-                "{} {} {}",
-                "Copied".bold().green(),
-                exe_name.bold().green(),
-                format!("-> {}", target_path.display()).dimmed()
-            );
+        match fs::copy(&source_path, &target_path) {
+            Ok(_) => {
+                if emit_text {
+                    println!(
+                        "{} {} {}",
+                        "Copied".bold().green(),
+                        exe_name.bold().green(),
+                        format!("-> {}", target_path.display()).dimmed()
+                    );
+                }
+                copied_count += 1;
+                copied_binaries.push(exe_name);
+            }
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to copy {} to {}: {}",
+                    source_path.display(),
+                    target_path.display(),
+                    e
+                );
+                if emit_text {
+                    eprintln!(
+                        "{} {} {}",
+                        "Failed".bold().bright_red(),
+                        exe_name.bold().yellow(),
+                        format!("-> {}: {}", target_path.display(), e).dimmed()
+                    );
+                }
+                failed_binaries.push(FailedCopy {
+                    binary: exe_name,
+                    error: error_msg,
+                });
+            }
         }
-        copied_count += 1;
-        copied_binaries.push(exe_name);
     }
 
     if emit_text {
@@ -330,7 +350,23 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
             "{}",
             format_deployment_summary(copied_count, &target_dir, override_used)
         );
+
+        // Report failures if any
+        if !failed_binaries.is_empty() {
+            println!();
+            eprintln!(
+                "{} {}",
+                "Failed to copy".bold().bright_red(),
+                format!("{} executable(s):", failed_binaries.len())
+                    .bold()
+                    .bright_red()
+            );
+            for failed in &failed_binaries {
+                eprintln!("  {} {}", "•".bright_red(), failed.error.dimmed());
+            }
+        }
     }
+
     let mut override_note: Option<OverrideNote> = None;
     if let Some(raw) = override_raw {
         let note = build_override_note(&raw, &target_dir, default_target.as_deref());
@@ -351,12 +387,20 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
             .as_ref()
             .map(|n| n.warnings.clone())
             .unwrap_or_default();
+        let status = if failed_binaries.is_empty() {
+            "ok"
+        } else if copied_count > 0 {
+            "partial"
+        } else {
+            "failed"
+        };
         let summary = DeploymentSummary {
-            status: "ok",
+            status,
             copied_count,
             target_dir: target_dir.display().to_string(),
             override_used,
             copied_binaries,
+            failed_binaries: failed_binaries.clone(),
             warnings,
         };
         let summary_json = match summary_format {
@@ -369,6 +413,24 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         };
         println!("{}", summary_json);
     }
+
+    // Return error if any copies failed
+    if !failed_binaries.is_empty() {
+        if copied_count > 0 {
+            anyhow::bail!(
+                "Failed to copy {} of {} executables (copied {} successfully)",
+                failed_binaries.len(),
+                copied_count + failed_binaries.len(),
+                copied_count
+            );
+        } else {
+            anyhow::bail!(
+                "Failed to copy {} executable(s)",
+                failed_binaries.len()
+            );
+        }
+    }
+
     Ok(())
 }
 
