@@ -20,11 +20,42 @@ pub enum SummaryFormat {
     JsonPretty,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildProfile {
+    #[default]
+    Release,
+    Debug,
+}
+
+impl BuildProfile {
+    fn artifact_dir(self) -> &'static str {
+        match self {
+            BuildProfile::Release => "release",
+            BuildProfile::Debug => "debug",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            BuildProfile::Release => "release",
+            BuildProfile::Debug => "debug",
+        }
+    }
+
+    fn cargo_hint(self) -> &'static str {
+        match self {
+            BuildProfile::Release => "cargo build --release",
+            BuildProfile::Debug => "cargo build",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunOptions {
     pub target_override: Option<PathBuf>,
     pub quiet: bool,
     pub summary: SummaryFormat,
+    pub profile: BuildProfile,
 }
 
 #[cfg(windows)]
@@ -42,6 +73,8 @@ const HINT_DEFAULT: &str = r"c:\\apps";
 
 #[cfg(not(windows))]
 const HINT_DEFAULT: &str = "~/.local/bin";
+
+const TARGET_OVERRIDE_ENV: &str = "MD_TARGET_DIR";
 
 fn format_deployment_summary(count: usize, target_dir: &Path, override_used: bool) -> String {
     let base = format!(
@@ -123,11 +156,7 @@ pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
         Err(e) => {
             eprintln!("{} {}", "Error:".bold().bright_red(), e);
             eprintln!();
-            eprintln!(
-                "{} {}",
-                "Usage:".bold().yellow(),
-                "deploy-tool [OPTIONS]".bold()
-            );
+            eprintln!("{} {}", "Usage:".bold().yellow(), "mdrcp [OPTIONS]".bold());
             let hint = match default_target_dir() {
                 Ok(p) => p.display().to_string(),
                 Err(_) => HINT_DEFAULT.to_string(),
@@ -135,14 +164,14 @@ pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
             eprintln!(
                 "{} {} {}",
                 "Hint:".bold().cyan(),
-                "Run this tool in a Rust project directory to copy release executables to".dimmed(),
+                format!(
+                    "Run this tool in a Rust project directory to copy {} executables to",
+                    options.profile.label()
+                )
+                .dimmed(),
                 hint.bold().bright_white()
             );
-            eprintln!(
-                "{} {}",
-                "More info:".bold().cyan(),
-                "deploy-tool --help".bold()
-            );
+            eprintln!("{} {}", "More info:".bold().cyan(), "mdrcp --help".bold());
             eprintln!(
                 "{} {}",
                 "Docs:".bold().cyan(),
@@ -188,8 +217,12 @@ fn manifest_bin_names(manifest: &Value) -> Vec<String> {
 
 /// Find all built executables from workspace members or single package.
 /// Returns the base names of executables (without `.exe`).
-fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<String>> {
-    let release_dir = project_dir.join("target").join("release");
+fn find_built_executables(
+    project_dir: &Path,
+    cargo_data: &Value,
+    profile: BuildProfile,
+) -> Result<Vec<String>> {
+    let profile_dir = project_dir.join("target").join(profile.artifact_dir());
     let mut candidate_names: HashSet<String> = HashSet::new();
 
     // Root package (if any)
@@ -224,11 +257,11 @@ fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<
         anyhow::bail!("No packages or bins found in Cargo.toml");
     }
 
-    // Filter to only candidates with existing release executables
+    // Filter to only candidates with existing executables for the selected profile
     let mut built_executables = Vec::new();
     for base in candidate_names {
         let exe_name = exe_filename(&base);
-        if release_dir.join(&exe_name).exists() {
+        if profile_dir.join(&exe_name).exists() {
             built_executables.push(base);
         }
     }
@@ -236,13 +269,32 @@ fn find_built_executables(project_dir: &Path, cargo_data: &Value) -> Result<Vec<
 }
 
 /// Determine the default deployment target directory per-OS.
+fn target_dir_override_from_env() -> Result<Option<PathBuf>> {
+    if let Some(raw) = std::env::var_os(TARGET_OVERRIDE_ENV) {
+        if raw.is_empty() {
+            anyhow::bail!(
+                "{} is set but empty; provide an absolute path",
+                TARGET_OVERRIDE_ENV
+            );
+        }
+        return Ok(Some(PathBuf::from(raw)));
+    }
+    Ok(None)
+}
+
 #[cfg(windows)]
 fn default_target_dir() -> Result<PathBuf> {
+    if let Some(custom) = target_dir_override_from_env()? {
+        return Ok(custom);
+    }
     Ok(PathBuf::from(r"c:\\apps"))
 }
 
 #[cfg(not(windows))]
 fn default_target_dir() -> Result<PathBuf> {
+    if let Some(custom) = target_dir_override_from_env()? {
+        return Ok(custom);
+    }
     let home = std::env::var_os("HOME")
         .ok_or_else(|| anyhow::anyhow!("HOME is not set; cannot determine ~/.local/bin"))?;
     Ok(Path::new(&home).join(".local").join("bin"))
@@ -260,10 +312,15 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     let cargo_data: Value =
         toml::from_str(&cargo_contents).context("Failed to parse Cargo.toml")?;
 
-    let built_executables = find_built_executables(project_dir, &cargo_data)?;
+    let profile = options.profile;
+    let built_executables = find_built_executables(project_dir, &cargo_data, profile)?;
 
     if built_executables.is_empty() {
-        anyhow::bail!("No built release executables found. Have you run 'cargo build --release'?");
+        anyhow::bail!(
+            "No built {} executables found. Have you run '{}'?",
+            profile.label(),
+            profile.cargo_hint()
+        );
     }
 
     let override_raw = options.target_override.clone();
@@ -302,10 +359,12 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     let mut copied_binaries: Vec<String> = Vec::new();
     let mut failed_binaries: Vec<FailedCopy> = Vec::new();
 
+    let source_dir = project_dir.join("target").join(profile.artifact_dir());
+
     for package_name in built_executables {
         let exe_name = exe_filename(&package_name);
 
-        let source_path = project_dir.join("target").join("release").join(&exe_name);
+        let source_path = source_dir.join(&exe_name);
         let target_path = target_dir.join(&exe_name);
 
         match fs::copy(&source_path, &target_path) {
@@ -424,10 +483,7 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
                 copied_count
             );
         } else {
-            anyhow::bail!(
-                "Failed to copy {} executable(s)",
-                failed_binaries.len()
-            );
+            anyhow::bail!("Failed to copy {} executable(s)", failed_binaries.len());
         }
     }
 

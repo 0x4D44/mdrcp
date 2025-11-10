@@ -1,11 +1,14 @@
 # mdrcp Deployment Tool
 
-`mdrcp` copies release binaries from a Rust project into a user-friendly install location:
+`mdrcp` copies built binaries from a Rust project into a user-friendly install location. It reads
+from `target/release` by default (matching `cargo build --release`) and can copy from
+`target/debug` via `--debug`.
 
 - Windows: `c:\apps`
 - Linux/macOS: `$HOME/.local/bin`
 
-Run it after `cargo build --release` inside a project directory.
+Run it after `cargo build --release` inside a project directory (or `cargo build` if you plan to
+pass `--debug`).
 
 ## Quick Start
 
@@ -14,7 +17,7 @@ cargo build --release
 mdrcp
 ```
 
-The tool detects release executables (workspace aware), copies them to the target directory, and prints colorized status.
+The tool detects built executables for the selected profile (workspace aware), copies them to the target directory, and prints colorized status.
 
 ## Flags
 
@@ -25,6 +28,14 @@ The tool detects release executables (workspace aware), copies them to the targe
 | `--quiet`, `-q` | Suppress banner/progress output (warnings still appear on stderr). |
 | `--target <path>`, `-t <path>` | Override the deployment directory (relative paths resolve from the project root). |
 | `--summary <format>` | Emit deployment summary in `text`, `json`, or `json-pretty`. Defaults to `text`. |
+| `--release` | Force copying from `target/release` (this is already the default). |
+| `--debug` | Copy from `target/debug` artifacts (use after `cargo build`). |
+
+### Environment Overrides
+
+| Variable | Description |
+|----------|-------------|
+| `MD_TARGET_DIR` | Absolute path that overrides the default install directory on every platform (handy for CI or tests). When unset, Windows defaults to `c:\apps` and Linux/macOS to `$HOME/.local/bin`. |
 
 ### Summary Formats
 
@@ -58,6 +69,6 @@ See `AGENTS.md` for full repository guidelines.
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
 | `No Cargo.toml found` | Tool not run from a Rust project root. | Change into the project directory first. |
-| `No built release executables found` | Release binaries missing. | Run `cargo build --release` and ensure artifacts exist in `target/release/`. |
+| `No built <profile> executables found` | Build artifacts missing for the selected profile. | Run `cargo build --release` for release or `cargo build` for debug, and ensure artifacts exist in the matching `target/<profile>/` directory. |
 | JSON summary missing warnings data | `--summary` defaults to `text`; no JSON emitted. | Pass `--summary json` (or `json-pretty`) to request structured output. |
 | Override note warns about redundant target | `--target` resolves to the default directory. | Drop the override or point to a different directory. |

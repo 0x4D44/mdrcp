@@ -1,7 +1,7 @@
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
 
-use super::{RunOptions, SummaryFormat};
+use super::{BuildProfile, RunOptions, SummaryFormat};
 
 const SUMMARY_ALLOWED: &[&str] = &["text", "json", "json-pretty"];
 
@@ -45,7 +45,7 @@ pub fn help_text() -> String {
     lines.push(format!(
         "{} {}",
         "Usage:".bold().yellow(),
-        "deploy-tool [OPTIONS]".bold()
+        "mdrcp [OPTIONS]".bold()
     ));
     lines.push(String::new());
     lines.push("Options:".bold().bright_white().to_string());
@@ -62,7 +62,7 @@ pub fn help_text() -> String {
     lines.push(format!(
         "  {} {}",
         "--target <path>, -t <path>".bright_cyan(),
-        "Copy release binaries into the directory (relative paths resolve from project root)"
+        "Copy built binaries into the directory (relative paths resolve from project root)"
             .dimmed()
     ));
     lines.push(format!(
@@ -77,6 +77,16 @@ pub fn help_text() -> String {
     ));
     lines.push(format!(
         "  {} {}",
+        "--release".bright_cyan(),
+        "Copy from target/release (default behavior)".dimmed()
+    ));
+    lines.push(format!(
+        "  {} {}",
+        "--debug".bright_cyan(),
+        "Copy from target/debug (use after `cargo build`)".dimmed()
+    ));
+    lines.push(format!(
+        "  {} {}",
         "(none)".bright_cyan(),
         "Run deployment routine".dimmed()
     ));
@@ -84,7 +94,8 @@ pub fn help_text() -> String {
     lines.push(format!(
         "{} {}",
         "Tip:".bold().cyan(),
-        "Use after `cargo build --release` to copy release binaries.".dimmed()
+        "Use after `cargo build --release` (or `cargo build` with --debug) to copy built binaries."
+            .dimmed()
     ));
     lines.push(format!(
         "{} {}",
@@ -183,6 +194,12 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
                         expected: SUMMARY_ALLOWED,
                     })?;
             }
+            "--release" => {
+                options.profile = BuildProfile::Release;
+            }
+            "--debug" => {
+                options.profile = BuildProfile::Debug;
+            }
             _ => {
                 return Err(ParseError::UnknownArgs(args.to_vec()));
             }
@@ -217,7 +234,7 @@ pub fn print_parse_error(error: &ParseError) {
             eprintln!(
                 "{} {}",
                 "Hint:".bold().cyan(),
-                "Run `deploy-tool --help` for usage details.".dimmed()
+                "Run `mdrcp --help` for usage details.".dimmed()
             );
         }
         ParseError::MissingValue { flag } => {
@@ -271,13 +288,15 @@ mod tests {
     #[test]
     fn test_help_text_includes_options() {
         let help = help_text();
-        assert!(help.contains("deploy-tool [OPTIONS]"));
+        assert!(help.contains("mdrcp [OPTIONS]"));
         assert!(help.contains("--help"));
         assert!(help.contains("--version"));
         assert!(help.contains("--target"));
         assert!(help.contains("Relative paths"));
         assert!(help.contains("--quiet"));
         assert!(help.contains("--summary"));
+        assert!(help.contains("--debug"));
+        assert!(help.contains("--release"));
     }
 
     #[test]
@@ -288,6 +307,7 @@ mod tests {
                 assert!(opts.target_override.is_none());
                 assert!(!opts.quiet);
                 assert_eq!(opts.summary, SummaryFormat::Text);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -301,6 +321,7 @@ mod tests {
                 assert_eq!(opts.target_override, Some(PathBuf::from("out/bin")));
                 assert!(!opts.quiet);
                 assert_eq!(opts.summary, SummaryFormat::Text);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -314,6 +335,7 @@ mod tests {
                 assert_eq!(opts.target_override, Some(PathBuf::from("out/bin")));
                 assert!(!opts.quiet);
                 assert_eq!(opts.summary, SummaryFormat::Text);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -327,6 +349,7 @@ mod tests {
                 assert!(opts.quiet);
                 assert!(opts.target_override.is_none());
                 assert_eq!(opts.summary, SummaryFormat::Text);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -345,6 +368,7 @@ mod tests {
                 assert!(opts.quiet);
                 assert_eq!(opts.target_override, Some(PathBuf::from("out/bin")));
                 assert_eq!(opts.summary, SummaryFormat::Text);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -357,6 +381,7 @@ mod tests {
             Command::Deploy(opts) => {
                 assert_eq!(opts.summary, SummaryFormat::Json);
                 assert!(!opts.quiet);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -369,6 +394,7 @@ mod tests {
             Command::Deploy(opts) => {
                 assert_eq!(opts.summary, SummaryFormat::Json);
                 assert!(opts.quiet);
+                assert_eq!(opts.profile, BuildProfile::Release);
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -385,6 +411,28 @@ mod tests {
                 expected: SUMMARY_ALLOWED,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_args_debug_flag() {
+        let cmd = parse_args(&["--debug".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.profile, BuildProfile::Debug);
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_release_flag() {
+        let cmd = parse_args(&["--debug".to_string(), "--release".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.profile, BuildProfile::Release);
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@
 - `cargo test` runs unit and integration tests.
 - `cargo fmt --all` formats; `cargo clippy --all-targets -- -D warnings` lints.
 
-What the tool does: run it inside a Rust project directory after a release build to copy found release executables to `c:\apps` on Windows, or to `~/.local/bin` on Linux/macOS (non‑Windows names omit `.exe`).
+What the tool does: run it inside a Rust project directory after building. By default it copies the release (`target/release`) executables to `c:\apps` on Windows or `~/.local/bin` on Linux/macOS (non‑Windows names omit `.exe`); pass `--debug` to instead copy from `target/debug`. Set `MD_TARGET_DIR` to override the default destination (useful for CI/tests).
 
 ## Coding Style & Naming Conventions
 - Rust 2021; keep lines ≤100 chars and functions short.

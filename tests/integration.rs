@@ -1,5 +1,6 @@
-use mdrcp::{do_main, exe_filename, run, run_with_options, RunOptions, SummaryFormat};
+use mdrcp::{do_main, exe_filename, run, run_with_options, BuildProfile, RunOptions};
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,11 +9,42 @@ use tempfile::tempdir;
 
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
+const TARGET_OVERRIDE_ENV: &str = "MD_TARGET_DIR";
+
 fn create_and_write_file(path: &Path, contents: &str) -> std::io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(contents.as_bytes())?;
     file.flush()?;
     Ok(())
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path_if_windows(key: &'static str, value: &Path) -> Option<Self> {
+        if cfg!(windows) {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Some(Self { key, prev })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if cfg!(windows) {
+            if let Some(prev) = self.prev.take() {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 }
 
 #[test]
@@ -57,6 +89,26 @@ fn test_missing_release_binary() {
 }
 
 #[test]
+fn test_missing_debug_binary() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[package]\nname=\"test\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    fs::create_dir_all(temp_dir.path().join("target").join("debug")).unwrap();
+
+    let mut options = RunOptions::default();
+    options.profile = BuildProfile::Debug;
+    let result = run_with_options(temp_dir.path(), &options);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("No built debug executables found"));
+}
+
+#[test]
 fn test_no_packages_or_bins() {
     let temp_dir = tempdir().unwrap();
     create_and_write_file(&temp_dir.path().join("Cargo.toml"), "").unwrap();
@@ -93,6 +145,8 @@ fn test_workspace_with_built_members() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
     let tmp_home = tempdir().unwrap();
     let old = std::env::var_os("HOME");
+    let target_dir = tmp_home.path().join("bin_out");
+    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
     std::env::set_var("HOME", tmp_home.path());
     let res = run(temp_dir.path());
     match old {
@@ -127,6 +181,8 @@ fn test_workspace_with_partial_builds() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
     let tmp_home = tempdir().unwrap();
     let old = std::env::var_os("HOME");
+    let target_dir = tmp_home.path().join("bin_out");
+    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
     std::env::set_var("HOME", tmp_home.path());
     let res = run(temp_dir.path());
     match old {
@@ -158,6 +214,8 @@ fn test_mixed_workspace_and_package() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
     let tmp_home = tempdir().unwrap();
     let old = std::env::var_os("HOME");
+    let target_dir = tmp_home.path().join("bin_out");
+    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
     std::env::set_var("HOME", tmp_home.path());
     let res = run(temp_dir.path());
     match old {
@@ -205,6 +263,8 @@ fn test_workspace_members_with_invalid_entries_are_ignored() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
     let tmp_home = tempdir().unwrap();
     let old = std::env::var_os("HOME");
+    let target_dir = tmp_home.path().join("bin_out");
+    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
     std::env::set_var("HOME", tmp_home.path());
     let res = run(temp_dir.path());
     match old {
@@ -237,6 +297,7 @@ fn test_workspace_no_built_executables() {
         .contains("No built release executables found"));
 }
 
+#[cfg(target_family = "unix")]
 #[test]
 fn test_deploy_to_linux_home_local_bin() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -263,6 +324,7 @@ fn test_deploy_to_linux_home_local_bin() {
     assert!(target.exists());
 }
 
+#[cfg(target_family = "unix")]
 #[test]
 fn test_path_stem_fallback_copies_tool() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -289,6 +351,7 @@ fn test_path_stem_fallback_copies_tool() {
     assert!(tmp_home.path().join(".local/bin").join(exe).exists());
 }
 
+#[cfg(target_family = "unix")]
 #[test]
 fn test_single_package_named_bin_copies() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -329,11 +392,32 @@ fn test_run_with_target_override_relative_path() {
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
     let override_dir = PathBuf::from("custom/bin");
-    let options = RunOptions {
-        target_override: Some(override_dir.clone()),
-        quiet: false,
-        summary: SummaryFormat::Text,
-    };
+    let mut options = RunOptions::default();
+    options.target_override = Some(override_dir.clone());
+
+    run_with_options(temp_project.path(), &options).unwrap();
+
+    let expected_target = temp_project.path().join(override_dir).join(exe);
+    assert!(expected_target.exists());
+}
+
+#[test]
+fn test_run_with_debug_profile_and_override() {
+    let temp_project = tempdir().unwrap();
+    create_and_write_file(
+        &temp_project.path().join("Cargo.toml"),
+        "[package]\nname=\"demo\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    let dbg = temp_project.path().join("target").join("debug");
+    fs::create_dir_all(&dbg).unwrap();
+    let exe = exe_filename("demo");
+    create_and_write_file(&dbg.join(&exe), "x").unwrap();
+
+    let override_dir = PathBuf::from("debug/bin");
+    let mut options = RunOptions::default();
+    options.target_override = Some(override_dir.clone());
+    options.profile = BuildProfile::Debug;
 
     run_with_options(temp_project.path(), &options).unwrap();
 
@@ -383,7 +467,7 @@ fn test_run_with_summary_json_quiet() {
     assert!(summary["copied_binaries"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::Value::String("demo".into())));
+        .contains(&serde_json::Value::String(exe.clone())));
 }
 
 #[test]
@@ -445,6 +529,7 @@ fn test_do_main_error_hint_home_missing_integration() {
         None => std::env::remove_var("HOME"),
     }
 }
+#[cfg(target_family = "unix")]
 #[test]
 fn test_copy_failure_existing_dir() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -473,6 +558,7 @@ fn test_copy_failure_existing_dir() {
     assert!(res.unwrap_err().to_string().contains("Failed to copy"));
 }
 
+#[cfg(target_family = "unix")]
 #[test]
 fn test_target_dir_creation_failure() {
     let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -523,6 +609,8 @@ fn test_do_main_error_and_success() {
     create_and_write_file(&rel.join(&exe), "x").unwrap();
     let tmp_home = tempdir().unwrap();
     let old = std::env::var_os("HOME");
+    let target_dir = tmp_home.path().join("bin_out");
+    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
     std::env::set_var("HOME", tmp_home.path());
     assert_eq!(do_main(temp_project.path()), 0);
     match old {
