@@ -69,7 +69,7 @@ pub fn exe_filename(base: &str) -> String {
 }
 
 #[cfg(windows)]
-const HINT_DEFAULT: &str = r"c:\\apps";
+const HINT_DEFAULT: &str = r"c:\apps";
 
 #[cfg(not(windows))]
 const HINT_DEFAULT: &str = "~/.local/bin";
@@ -287,7 +287,7 @@ fn default_target_dir() -> Result<PathBuf> {
     if let Some(custom) = target_dir_override_from_env()? {
         return Ok(custom);
     }
-    Ok(PathBuf::from(r"c:\\apps"))
+    Ok(PathBuf::from(r"c:\apps"))
 }
 
 #[cfg(not(windows))]
