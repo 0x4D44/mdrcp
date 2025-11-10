@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`mdrcp` is a Rust command-line deployment tool that automates copying release executables from Rust projects to a system-wide applications directory (`c:\apps`). It reads the package name from `Cargo.toml` and copies the corresponding release binary from `target/release/` to the target directory.
+`mdrcp` is a Rust command-line deployment tool that automates copying built executables from Rust projects to a system-wide applications directory (`c:\apps`). It reads the package/workspace metadata from `Cargo.toml` and copies the corresponding binaries from `target/release/` by default or from `target/debug/` when the `--debug` flag is supplied. You can override the default install location (useful for CI/tests) by setting the `MD_TARGET_DIR` environment variable.
 
 ## Build Commands
 
@@ -26,9 +26,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Key Operations
 1. **Validation**: Checks for existence of `Cargo.toml` in target directory
 2. **Package Discovery**: Parses `Cargo.toml` to extract package name
-3. **Binary Location**: Constructs path to release executable (handles Windows `.exe` extension)
+3. **Binary Location**: Constructs the path to the selected build profile's executable (handles Windows `.exe` extension)
 4. **Directory Creation**: Creates `c:\apps` if it doesn't exist
-5. **File Copy**: Copies executable from `target/release/` to `c:\apps`
+5. **File Copy**: Copies executables from `target/<profile>/` to `c:\apps` (or the path in `MD_TARGET_DIR` when set)
 
 ### Testing Strategy
 - **Unit Tests**: Located in `src/main.rs:63-118`
@@ -47,4 +47,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Usage Pattern
 
-This tool is designed to be run in the root directory of any Rust project after building with `cargo build --release`. It automatically detects the project name and deploys the executable to a centralized location.
+This tool is designed to be run in the root directory of any Rust project after building with `cargo build --release` (or `cargo build` if you plan to pass `--debug`). It automatically detects the project name and deploys the executable to a centralized location.
