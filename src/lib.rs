@@ -27,6 +27,22 @@ pub enum BuildProfile {
     Debug,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectType {
+    #[default]
+    Standard,
+    Tauri,
+}
+
+impl ProjectType {
+    fn label(self) -> &'static str {
+        match self {
+            ProjectType::Standard => "standard",
+            ProjectType::Tauri => "Tauri",
+        }
+    }
+}
+
 impl BuildProfile {
     fn artifact_dir(self) -> &'static str {
         match self {
@@ -56,6 +72,7 @@ pub struct RunOptions {
     pub quiet: bool,
     pub summary: SummaryFormat,
     pub profile: BuildProfile,
+    pub project_type: Option<ProjectType>, // None = auto-detect
 }
 
 #[cfg(windows)]
@@ -217,17 +234,24 @@ fn manifest_bin_names(manifest: &Value) -> Vec<String> {
 
 /// Find all built executables from workspace members or single package.
 /// Returns the base names of executables (without `.exe`).
+/// `rust_base_dir` is the directory containing Cargo.toml and target/.
 fn find_built_executables(
-    project_dir: &Path,
+    rust_base_dir: &Path,
     cargo_data: &Value,
     profile: BuildProfile,
+    extra_names: &[String],
 ) -> Result<Vec<String>> {
-    let profile_dir = project_dir.join("target").join(profile.artifact_dir());
+    let profile_dir = rust_base_dir.join("target").join(profile.artifact_dir());
     let mut candidate_names: HashSet<String> = HashSet::new();
 
     // Root package (if any)
     for name in manifest_bin_names(cargo_data) {
         candidate_names.insert(name);
+    }
+
+    // Add extra names (e.g., from tauri.conf.json productName)
+    for name in extra_names {
+        candidate_names.insert(name.clone());
     }
 
     // Workspace members (if any)
@@ -240,7 +264,7 @@ fn find_built_executables(
             let Some(member_path) = member.as_str() else {
                 continue;
             };
-            let member_manifest_path = project_dir.join(member_path).join("Cargo.toml");
+            let member_manifest_path = rust_base_dir.join(member_path).join("Cargo.toml");
             let Ok(contents) = fs::read_to_string(&member_manifest_path) else {
                 continue;
             };
@@ -300,11 +324,73 @@ fn default_target_dir() -> Result<PathBuf> {
     Ok(Path::new(&home).join(".local").join("bin"))
 }
 
+/// Detect whether this is a Tauri project by checking for src-tauri/Cargo.toml
+/// and tauri.conf.json (or .json5) in the project root.
+fn detect_project_type(project_dir: &Path) -> ProjectType {
+    let tauri_cargo = project_dir.join("src-tauri").join("Cargo.toml");
+    let tauri_conf = project_dir.join("tauri.conf.json");
+    let tauri_conf5 = project_dir.join("tauri.conf.json5");
+
+    if tauri_cargo.exists() && (tauri_conf.exists() || tauri_conf5.exists()) {
+        ProjectType::Tauri
+    } else {
+        ProjectType::Standard
+    }
+}
+
+/// Read the productName from tauri.conf.json or tauri.conf.json5.
+/// Returns None if file doesn't exist or productName is not set.
+fn read_tauri_product_name(project_dir: &Path) -> Option<String> {
+    let conf_paths = [
+        project_dir.join("tauri.conf.json"),
+        project_dir.join("tauri.conf.json5"),
+    ];
+
+    for conf_path in &conf_paths {
+        if let Ok(contents) = fs::read_to_string(conf_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
+                // productName can be at root level or under package
+                if let Some(name) = json.get("productName").and_then(|v| v.as_str()) {
+                    return Some(name.to_string());
+                }
+                if let Some(name) = json
+                    .get("package")
+                    .and_then(|p| p.get("productName"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Main deployment function that handles both single packages and workspaces
 pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> {
-    let cargo_path = project_dir.join("Cargo.toml");
+    // Determine project type: use explicit option or auto-detect
+    let (project_type, auto_detected) = match options.project_type {
+        Some(pt) => (pt, false),
+        None => (detect_project_type(project_dir), true),
+    };
+
+    // For Tauri projects, the Rust project is in src-tauri/
+    let rust_base_dir = if project_type == ProjectType::Tauri {
+        project_dir.join("src-tauri")
+    } else {
+        project_dir.to_path_buf()
+    };
+
+    let cargo_path = rust_base_dir.join("Cargo.toml");
     if !cargo_path.exists() {
-        anyhow::bail!("No Cargo.toml found. Please run this tool in a Rust project directory");
+        if project_type == ProjectType::Tauri {
+            anyhow::bail!(
+                "No Cargo.toml found at {}. Is this a valid Tauri project?",
+                cargo_path.display()
+            );
+        } else {
+            anyhow::bail!("No Cargo.toml found. Please run this tool in a Rust project directory");
+        }
     }
 
     let cargo_contents = fs::read_to_string(&cargo_path).context("Failed to read Cargo.toml")?;
@@ -312,8 +398,16 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     let cargo_data: Value =
         toml::from_str(&cargo_contents).context("Failed to parse Cargo.toml")?;
 
+    // For Tauri projects, also check productName in tauri.conf.json
+    let mut extra_names: Vec<String> = Vec::new();
+    if project_type == ProjectType::Tauri {
+        if let Some(product_name) = read_tauri_product_name(project_dir) {
+            extra_names.push(product_name);
+        }
+    }
+
     let profile = options.profile;
-    let built_executables = find_built_executables(project_dir, &cargo_data, profile)?;
+    let built_executables = find_built_executables(&rust_base_dir, &cargo_data, profile, &extra_names)?;
 
     if built_executables.is_empty() {
         anyhow::bail!(
@@ -355,11 +449,22 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         })?;
     }
 
+    // Print project type if not quiet
+    if emit_text && project_type == ProjectType::Tauri {
+        let mode_indicator = if auto_detected { "[auto]" } else { "[--tauri]" };
+        println!(
+            "{} {} {}",
+            "Detected".bold().cyan(),
+            project_type.label().bold().bright_white(),
+            format!("project {}", mode_indicator).dimmed()
+        );
+    }
+
     let mut copied_count = 0;
     let mut copied_binaries: Vec<String> = Vec::new();
     let mut failed_binaries: Vec<FailedCopy> = Vec::new();
 
-    let source_dir = project_dir.join("target").join(profile.artifact_dir());
+    let source_dir = rust_base_dir.join("target").join(profile.artifact_dir());
 
     for package_name in built_executables {
         let exe_name = exe_filename(&package_name);

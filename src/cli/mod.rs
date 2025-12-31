@@ -1,7 +1,7 @@
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
 
-use super::{BuildProfile, RunOptions, SummaryFormat};
+use super::{BuildProfile, ProjectType, RunOptions, SummaryFormat};
 
 const SUMMARY_ALLOWED: &[&str] = &["text", "json", "json-pretty"];
 
@@ -87,6 +87,16 @@ pub fn help_text() -> String {
     ));
     lines.push(format!(
         "  {} {}",
+        "--tauri".bright_cyan(),
+        "Force Tauri project mode (look in src-tauri/)".dimmed()
+    ));
+    lines.push(format!(
+        "  {} {}",
+        "--no-tauri".bright_cyan(),
+        "Disable Tauri auto-detection".dimmed()
+    ));
+    lines.push(format!(
+        "  {} {}",
         "(none)".bright_cyan(),
         "Run deployment routine".dimmed()
     ));
@@ -101,6 +111,11 @@ pub fn help_text() -> String {
         "{} {}",
         "Relative paths:".bold().magenta(),
         "Resolved against the project directory passed to the tool.".dimmed()
+    ));
+    lines.push(format!(
+        "{} {}",
+        "Tauri:".bold().magenta(),
+        "Auto-detected when src-tauri/Cargo.toml and tauri.conf.json exist.".dimmed()
     ));
     lines.join("\n")
 }
@@ -199,6 +214,12 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
             }
             "--debug" => {
                 options.profile = BuildProfile::Debug;
+            }
+            "--tauri" => {
+                options.project_type = Some(ProjectType::Tauri);
+            }
+            "--no-tauri" => {
+                options.project_type = Some(ProjectType::Standard);
             }
             _ => {
                 return Err(ParseError::UnknownArgs(args.to_vec()));
@@ -458,5 +479,47 @@ mod tests {
     fn test_parse_args_unknown() {
         let err = parse_args(&["--unknown".to_string()]).unwrap_err();
         assert_eq!(err, ParseError::UnknownArgs(vec!["--unknown".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_args_tauri_flag() {
+        let cmd = parse_args(&["--tauri".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.project_type, Some(ProjectType::Tauri));
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_no_tauri_flag() {
+        let cmd = parse_args(&["--no-tauri".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.project_type, Some(ProjectType::Standard));
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_tauri_with_debug() {
+        let cmd = parse_args(&["--tauri".to_string(), "--debug".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.project_type, Some(ProjectType::Tauri));
+                assert_eq!(opts.profile, BuildProfile::Debug);
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_text_includes_tauri_options() {
+        let help = help_text();
+        assert!(help.contains("--tauri"));
+        assert!(help.contains("--no-tauri"));
+        assert!(help.contains("src-tauri"));
     }
 }
