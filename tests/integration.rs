@@ -1,4 +1,4 @@
-use mdrcp::{do_main, exe_filename, run, run_with_options, BuildProfile, RunOptions};
+use mdrcp::{do_main, exe_filename, run, run_with_options, BuildProfile, ProjectType, RunOptions};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -617,4 +617,246 @@ fn test_do_main_error_and_success() {
         Some(v) => std::env::set_var("HOME", v),
         None => std::env::remove_var("HOME"),
     }
+}
+
+// ============== Tauri Support Tests ==============
+
+#[test]
+fn test_tauri_auto_detect_and_deploy() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create Tauri project structure
+    let src_tauri = temp_project.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"my-tauri-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    create_and_write_file(
+        &temp_project.path().join("tauri.conf.json"),
+        r#"{"productName": "My Tauri App"}"#,
+    )
+    .unwrap();
+
+    // Create the release executable
+    let rel = src_tauri.join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("my-tauri-app");
+    create_and_write_file(&rel.join(&exe), "binary content").unwrap();
+
+    // Set up target directory
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        quiet: true,
+        ..Default::default()
+    };
+
+    // Deploy
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_ok(), "Tauri deploy failed: {:?}", result);
+
+    // Verify executable was copied
+    assert!(target_dir.path().join(&exe).exists());
+}
+
+#[test]
+fn test_tauri_with_product_name_from_config() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create Tauri project with different productName
+    let src_tauri = temp_project.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"tauri-backend\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    // productName differs from Cargo.toml package name
+    create_and_write_file(
+        &temp_project.path().join("tauri.conf.json"),
+        r#"{"productName": "MyApp"}"#,
+    )
+    .unwrap();
+
+    // Create executables for both names
+    let rel = src_tauri.join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let product_exe = exe_filename("MyApp");
+    create_and_write_file(&rel.join(&product_exe), "product binary").unwrap();
+
+    // Set up target directory
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        quiet: true,
+        ..Default::default()
+    };
+
+    // Deploy
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_ok(), "Tauri deploy failed: {:?}", result);
+
+    // Verify productName executable was copied
+    assert!(target_dir.path().join(&product_exe).exists());
+}
+
+#[test]
+fn test_tauri_debug_profile() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create Tauri project structure
+    let src_tauri = temp_project.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"debug-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    create_and_write_file(
+        &temp_project.path().join("tauri.conf.json"),
+        "{}",
+    )
+    .unwrap();
+
+    // Create the debug executable (not release)
+    let dbg = src_tauri.join("target").join("debug");
+    fs::create_dir_all(&dbg).unwrap();
+    let exe = exe_filename("debug-app");
+    create_and_write_file(&dbg.join(&exe), "debug binary").unwrap();
+
+    // Set up target directory with debug profile
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        profile: BuildProfile::Debug,
+        quiet: true,
+        ..Default::default()
+    };
+
+    // Deploy
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_ok(), "Tauri debug deploy failed: {:?}", result);
+
+    // Verify executable was copied
+    assert!(target_dir.path().join(&exe).exists());
+}
+
+#[test]
+fn test_force_tauri_on_standard_project_fails() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create a standard Rust project (no src-tauri)
+    create_and_write_file(
+        &temp_project.path().join("Cargo.toml"),
+        "[package]\nname=\"standard-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        project_type: Some(ProjectType::Tauri), // Force Tauri mode
+        quiet: true,
+        ..Default::default()
+    };
+
+    // Should fail because src-tauri/Cargo.toml doesn't exist
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("No Cargo.toml found"));
+}
+
+#[test]
+fn test_no_tauri_flag_uses_root_cargo() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create a Tauri project structure but also have a root Cargo.toml
+    create_and_write_file(
+        &temp_project.path().join("Cargo.toml"),
+        "[package]\nname=\"root-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let src_tauri = temp_project.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"tauri-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    create_and_write_file(
+        &temp_project.path().join("tauri.conf.json"),
+        "{}",
+    )
+    .unwrap();
+
+    // Create release executable in root target (not src-tauri/target)
+    let rel = temp_project.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("root-app");
+    create_and_write_file(&rel.join(&exe), "root binary").unwrap();
+
+    // Force standard mode with --no-tauri
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        project_type: Some(ProjectType::Standard), // --no-tauri
+        quiet: true,
+        ..Default::default()
+    };
+
+    // Deploy should use root Cargo.toml
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_ok(), "Standard deploy failed: {:?}", result);
+
+    // Verify root-app was copied, not tauri-app
+    assert!(target_dir.path().join(&exe).exists());
+}
+
+#[test]
+fn test_tauri_not_detected_without_tauri_conf() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let temp_project = tempdir().unwrap();
+
+    // Create src-tauri/Cargo.toml but NO tauri.conf.json
+    // This should NOT be detected as Tauri
+    create_and_write_file(
+        &temp_project.path().join("Cargo.toml"),
+        "[package]\nname=\"hybrid-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let src_tauri = temp_project.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"tauri-part\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    // Note: NO tauri.conf.json
+
+    // Create release executable in root target
+    let rel = temp_project.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("hybrid-app");
+    create_and_write_file(&rel.join(&exe), "hybrid binary").unwrap();
+
+    // Auto-detect should pick standard mode
+    let target_dir = tempdir().unwrap();
+    let options = RunOptions {
+        target_override: Some(target_dir.path().to_path_buf()),
+        quiet: true,
+        ..Default::default()
+    };
+
+    let result = run_with_options(temp_project.path(), &options);
+    assert!(result.is_ok(), "Standard deploy failed: {:?}", result);
+    assert!(target_dir.path().join(&exe).exists());
 }
