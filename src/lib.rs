@@ -407,7 +407,8 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     }
 
     let profile = options.profile;
-    let built_executables = find_built_executables(&rust_base_dir, &cargo_data, profile, &extra_names)?;
+    let built_executables =
+        find_built_executables(&rust_base_dir, &cargo_data, profile, &extra_names)?;
 
     if built_executables.is_empty() {
         anyhow::bail!(
@@ -642,5 +643,87 @@ mod tests {
         );
         assert!(!note.lines.iter().any(|l| l.contains("Warning:")));
         assert!(note.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_labels() {
+        assert_eq!(ProjectType::Standard.label(), "standard");
+        assert_eq!(ProjectType::Tauri.label(), "Tauri");
+        assert_eq!(BuildProfile::Release.label(), "release");
+        assert_eq!(BuildProfile::Debug.label(), "debug");
+    }
+
+    #[test]
+    fn test_manifest_bin_names_explicit_bin() {
+        let toml_str = r#"
+            [package]
+            name = "my-pkg"
+            
+            [[bin]]
+            name = "custom-bin"
+            path = "src/main.rs"
+        "#;
+        let val: Value = toml::from_str(toml_str).unwrap();
+        let names = manifest_bin_names(&val);
+        assert!(names.contains(&"custom-bin".to_string()));
+        // The current implementation adds the package name if it's not in the list.
+        // Even if explicit [[bin]] exists, it optimistically adds package name.
+        assert!(names.contains(&"my-pkg".to_string()));
+    }
+
+    #[test]
+    fn test_manifest_bin_names_explicit_bin_same_as_package() {
+        let toml_str = r#"
+            [package]
+            name = "my-pkg"
+            
+            [[bin]]
+            name = "my-pkg"
+        "#;
+        let val: Value = toml::from_str(toml_str).unwrap();
+        let names = manifest_bin_names(&val);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "my-pkg");
+    }
+
+    #[test]
+    fn test_manifest_bin_names_multiple() {
+        let toml_str = r#"
+            [package]
+            name = "pkg"
+            
+            [[bin]]
+            name = "bin1"
+            
+            [[bin]]
+            name = "bin2"
+        "#;
+        let val: Value = toml::from_str(toml_str).unwrap();
+        let names = manifest_bin_names(&val);
+        assert!(names.contains(&"bin1".to_string()));
+        assert!(names.contains(&"bin2".to_string()));
+        assert!(names.contains(&"pkg".to_string()));
+    }
+
+    #[test]
+    fn test_read_tauri_product_name_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        // 1. Invalid JSON
+        std::fs::write(root.join("tauri.conf.json"), "{ invalid }").unwrap();
+        assert!(read_tauri_product_name(root).is_none());
+
+        // 2. Valid JSON, missing productName
+        std::fs::write(root.join("tauri.conf.json"), r#"{ "foo": "bar" }"#).unwrap();
+        assert!(read_tauri_product_name(root).is_none());
+
+        // 3. Valid JSON, missing productName in package
+        std::fs::write(
+            root.join("tauri.conf.json"),
+            r#"{ "package": { "version": "1.0" } }"#,
+        )
+        .unwrap();
+        assert!(read_tauri_product_name(root).is_none());
     }
 }
