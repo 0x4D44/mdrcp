@@ -504,6 +504,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_summary_text_explicit() {
+        let cmd = parse_args(&["--summary".to_string(), "text".to_string()]).unwrap();
+        match cmd {
+            Command::Deploy(opts) => {
+                assert_eq!(opts.summary, SummaryFormat::Text);
+            }
+            _ => panic!("Unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_empty_values() {
+        // Test --target=
+        let err = parse_args(&["--target=".to_string()]).unwrap_err();
+        assert!(matches!(err, ParseError::MissingValue { flag } if flag == "--target"));
+
+        // Test --summary=
+        let err_summary = parse_args(&["--summary=".to_string()]).unwrap_err();
+        assert!(matches!(err_summary, ParseError::MissingValue { flag } if flag == "--summary"));
+    }
+
+    #[test]
     fn test_parse_args_tauri_with_debug() {
         let cmd = parse_args(&["--tauri".to_string(), "--debug".to_string()]).unwrap();
         match cmd {
@@ -521,5 +543,31 @@ mod tests {
         assert!(help.contains("--tauri"));
         assert!(help.contains("--no-tauri"));
         assert!(help.contains("src-tauri"));
+    }
+
+    #[test]
+    fn test_print_functions_run_without_panic() {
+        // These just ensure the code paths are hit; we don't capture stdout here.
+        print_help();
+        print_version_banner();
+    }
+
+    #[test]
+    fn test_print_parse_errors() {
+        // Exercise the display logic for different error variants
+        print_parse_error(&ParseError::UnknownArgs(vec!["--bad".to_string()]));
+
+        print_parse_error(&ParseError::MissingValue {
+            flag: "--target".to_string(),
+        });
+
+        print_parse_error(&ParseError::InvalidValue {
+            flag: "--summary".to_string(),
+            value: "xml".to_string(),
+            expected: &["text", "json"],
+        });
+
+        // Edge case: UnknownArgs empty (should return early, but good to test)
+        print_parse_error(&ParseError::UnknownArgs(vec![]));
     }
 }

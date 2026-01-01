@@ -98,8 +98,10 @@ fn test_missing_debug_binary() {
     .unwrap();
     fs::create_dir_all(temp_dir.path().join("target").join("debug")).unwrap();
 
-    let mut options = RunOptions::default();
-    options.profile = BuildProfile::Debug;
+    let options = RunOptions {
+        profile: BuildProfile::Debug,
+        ..Default::default()
+    };
     let result = run_with_options(temp_dir.path(), &options);
     assert!(result.is_err());
     assert!(result
@@ -161,10 +163,12 @@ fn test_workspace_with_partial_builds() {
     let temp_dir = tempdir().unwrap();
     create_and_write_file(
         &temp_dir.path().join("Cargo.toml"),
-        "[workspace]\nmembers=[\"a\",\"b\",\"c\"]",
+        "[workspace]\nmembers=[\"package_a\", \"package_b\"]",
     )
     .unwrap();
-    for m in ["a", "b", "c"] {
+
+    // Create members
+    for m in ["package_a", "package_b"] {
         fs::create_dir_all(temp_dir.path().join(m)).unwrap();
         create_and_write_file(
             &temp_dir.path().join(m).join("Cargo.toml"),
@@ -172,24 +176,234 @@ fn test_workspace_with_partial_builds() {
         )
         .unwrap();
     }
+
+    // Only build package_a
     let rel = temp_dir.path().join("target").join("release");
     fs::create_dir_all(&rel).unwrap();
-    for exe in [exe_filename("a"), exe_filename("c")] {
-        create_and_write_file(&rel.join(exe), "x").unwrap();
-    }
-    // Should succeed copying two
-    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-    let tmp_home = tempdir().unwrap();
-    let old = std::env::var_os("HOME");
-    let target_dir = tmp_home.path().join("bin_out");
-    let _target_guard = EnvVarGuard::set_path_if_windows(TARGET_OVERRIDE_ENV, &target_dir);
-    std::env::set_var("HOME", tmp_home.path());
-    let res = run(temp_dir.path());
-    match old {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-    assert!(res.is_ok());
+    let exe = exe_filename("package_a");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .arg("--release")
+        .args(["--target", "dist"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Copied"));
+    assert!(stdout.contains("package_a"));
+    assert!(!stdout.contains("package_b"));
+}
+
+#[test]
+fn test_json_output_structure() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[package]\nname=\"my-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("my-app");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .args(["--summary", "json", "-q", "--target", "dist"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["copied_count"], 1);
+
+    let binaries = json["copied_binaries"].as_array().unwrap();
+    let found = binaries.iter().any(|v| v.as_str().unwrap() == exe);
+    assert!(found);
+}
+
+#[test]
+fn test_json_pretty_output() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[package]\nname=\"my-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("my-app");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .args(["--summary", "json-pretty", "-q", "--target", "dist"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // check for newlines which imply pretty printing
+    assert!(stdout.contains("\n"));
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["status"], "ok");
+}
+
+#[test]
+fn test_env_var_override_empty() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[package]\nname=\"my-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("my-app");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .env("MD_TARGET_DIR", "")
+        .output()
+        .unwrap();
+
+    // Should fail
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("is set but empty"));
+}
+
+#[test]
+fn test_workspace_member_invalid_toml() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"package_a\", \"package_b\"]",
+    )
+    .unwrap();
+
+    // Valid member
+    fs::create_dir_all(temp_dir.path().join("package_a")).unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("package_a").join("Cargo.toml"),
+        "[package]\nname=\"package_a\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    // Invalid member
+    fs::create_dir_all(temp_dir.path().join("package_b")).unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("package_b").join("Cargo.toml"),
+        "invalid toml content",
+    )
+    .unwrap();
+
+    // Build binary for valid member
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("package_a");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .arg("-q")
+        .args(["--target", "dist"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(temp_dir.path().join("dist").join(exe).exists());
+}
+
+#[test]
+fn test_workspace_member_missing_toml() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"package_a\", \"package_b\"]",
+    )
+    .unwrap();
+
+    // Valid member
+    fs::create_dir_all(temp_dir.path().join("package_a")).unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("package_a").join("Cargo.toml"),
+        "[package]\nname=\"package_a\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    // Member with NO Cargo.toml
+    fs::create_dir_all(temp_dir.path().join("package_b")).unwrap();
+
+    // Build binary for valid member
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("package_a");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .arg("-q")
+        .args(["--target", "dist"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(temp_dir.path().join("dist").join(exe).exists());
+}
+
+#[test]
+fn test_tauri_detected_output() {
+    let temp_dir = tempdir().unwrap();
+
+    // Tauri structure
+    let src_tauri = temp_dir.path().join("src-tauri");
+    fs::create_dir_all(&src_tauri).unwrap();
+    create_and_write_file(
+        &src_tauri.join("Cargo.toml"),
+        "[package]\nname=\"my-tauri-app\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("tauri.conf.json"),
+        r#"{"productName": "App"}"#,
+    )
+    .unwrap();
+
+    let rel = src_tauri.join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("my-tauri-app");
+    create_and_write_file(&rel.join(&exe), "x").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let output = std::process::Command::new(bin)
+        .current_dir(temp_dir.path())
+        .args(["--target", "dist"]) // ensure we don't try to write to system
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Split checks because ANSI color codes might separate words
+    assert!(stdout.contains("Detected"));
+    assert!(stdout.contains("Tauri"));
+    assert!(stdout.contains("project"));
 }
 
 #[test]
@@ -392,8 +606,10 @@ fn test_run_with_target_override_relative_path() {
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
     let override_dir = PathBuf::from("custom/bin");
-    let mut options = RunOptions::default();
-    options.target_override = Some(override_dir.clone());
+    let options = RunOptions {
+        target_override: Some(override_dir.clone()),
+        ..Default::default()
+    };
 
     run_with_options(temp_project.path(), &options).unwrap();
 
@@ -415,9 +631,11 @@ fn test_run_with_debug_profile_and_override() {
     create_and_write_file(&dbg.join(&exe), "x").unwrap();
 
     let override_dir = PathBuf::from("debug/bin");
-    let mut options = RunOptions::default();
-    options.target_override = Some(override_dir.clone());
-    options.profile = BuildProfile::Debug;
+    let options = RunOptions {
+        target_override: Some(override_dir.clone()),
+        profile: BuildProfile::Debug,
+        ..Default::default()
+    };
 
     run_with_options(temp_project.path(), &options).unwrap();
 
@@ -717,11 +935,7 @@ fn test_tauri_debug_profile() {
         "[package]\nname=\"debug-app\"\nversion=\"0.1.0\"",
     )
     .unwrap();
-    create_and_write_file(
-        &temp_project.path().join("tauri.conf.json"),
-        "{}",
-    )
-    .unwrap();
+    create_and_write_file(&temp_project.path().join("tauri.conf.json"), "{}").unwrap();
 
     // Create the debug executable (not release)
     let dbg = src_tauri.join("target").join("debug");
@@ -769,7 +983,10 @@ fn test_force_tauri_on_standard_project_fails() {
     // Should fail because src-tauri/Cargo.toml doesn't exist
     let result = run_with_options(temp_project.path(), &options);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("No Cargo.toml found"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("No Cargo.toml found"));
 }
 
 #[test]
@@ -791,11 +1008,7 @@ fn test_no_tauri_flag_uses_root_cargo() {
         "[package]\nname=\"tauri-app\"\nversion=\"0.1.0\"",
     )
     .unwrap();
-    create_and_write_file(
-        &temp_project.path().join("tauri.conf.json"),
-        "{}",
-    )
-    .unwrap();
+    create_and_write_file(&temp_project.path().join("tauri.conf.json"), "{}").unwrap();
 
     // Create release executable in root target (not src-tauri/target)
     let rel = temp_project.path().join("target").join("release");

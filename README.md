@@ -30,12 +30,22 @@ The tool detects built executables for the selected profile (workspace aware), c
 | `--summary <format>` | Emit deployment summary in `text`, `json`, or `json-pretty`. Defaults to `text`. |
 | `--release` | Force copying from `target/release` (this is already the default). |
 | `--debug` | Copy from `target/debug` artifacts (use after `cargo build`). |
+| `--tauri` | Force Tauri project mode (looks for `src-tauri/Cargo.toml`). |
+| `--no-tauri` | Disable Tauri auto-detection (force standard mode). |
 
 ### Environment Overrides
 
 | Variable | Description |
 |----------|-------------|
 | `MD_TARGET_DIR` | Absolute path that overrides the default install directory on every platform (handy for CI or tests). When unset, Windows defaults to `c:\apps` and Linux/macOS to `$HOME/.local/bin`. |
+
+## Tauri Support
+
+`mdrcp` automatically detects Tauri projects by checking for `src-tauri/Cargo.toml` and `tauri.conf.json` (or `.json5`) in the project root.
+
+- **Auto-Detection:** When detected, it deploys binaries from `src-tauri/target/...` instead of the root.
+- **Product Name:** It reads the `productName` from `tauri.conf.json` and adds it to the list of binaries to deploy (useful if it differs from the Cargo package name).
+- **Manual Control:** Use `--tauri` to force this mode or `--no-tauri` to disable it.
 
 ### Summary Formats
 
@@ -71,4 +81,5 @@ See `AGENTS.md` for full repository guidelines.
 | `No Cargo.toml found` | Tool not run from a Rust project root. | Change into the project directory first. |
 | `No built <profile> executables found` | Build artifacts missing for the selected profile. | Run `cargo build --release` for release or `cargo build` for debug, and ensure artifacts exist in the matching `target/<profile>/` directory. |
 | JSON summary missing warnings data | `--summary` defaults to `text`; no JSON emitted. | Pass `--summary json` (or `json-pretty`) to request structured output. |
-| Override note warns about redundant target | `--target` resolves to the default directory. | Drop the override or point to a different directory. |
+| `Override note warns about redundant target` | `--target` resolves to the default directory. | Drop the override or point to a different directory. |
+| `No Cargo.toml found` (Tauri) | Tool run in root but `src-tauri` missing/invalid. | Ensure `src-tauri/Cargo.toml` exists or run in `src-tauri` directly. |
