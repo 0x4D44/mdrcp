@@ -4,7 +4,10 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use toml::Value;
+
+const UPDATER_TEMP_NAME: &str = "mdrcp_updater.exe";
 
 pub mod cli;
 
@@ -324,6 +327,76 @@ fn default_target_dir() -> Result<PathBuf> {
     Ok(Path::new(&home).join(".local").join("bin"))
 }
 
+/// Check if the target path is our own running executable
+fn is_self_update_target(target_path: &Path) -> bool {
+    let current_exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(_) => return false,
+    };
+    let current_exe_canonical = current_exe.canonicalize().unwrap_or(current_exe);
+    let target_canonical = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.to_path_buf());
+    current_exe_canonical == target_canonical
+}
+
+/// Result of attempting a self-update
+enum SelfUpdateResult {
+    /// Not a self-update scenario
+    NotApplicable,
+    /// Self-update spawned successfully - caller should exit
+    Spawned,
+    /// Self-update failed to spawn
+    Failed(String),
+}
+
+/// Check if we're trying to overwrite our own executable, and if so,
+/// spawn a temp copy to perform the update.
+fn try_self_update(source_path: &Path, target_path: &Path) -> SelfUpdateResult {
+    // Get canonical path of current executable
+    let current_exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(_) => return SelfUpdateResult::NotApplicable,
+    };
+
+    // Canonicalize paths for comparison
+    let current_exe_canonical = current_exe.canonicalize().unwrap_or(current_exe);
+    let target_canonical = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.to_path_buf());
+
+    // Check if we're trying to overwrite ourselves
+    if current_exe_canonical != target_canonical {
+        return SelfUpdateResult::NotApplicable;
+    }
+
+    // We're updating ourselves - copy current exe to temp and spawn it
+    let temp_dir = std::env::temp_dir();
+    let updater_path = temp_dir.join(UPDATER_TEMP_NAME);
+
+    // Copy current executable to temp location
+    if let Err(e) = fs::copy(&current_exe_canonical, &updater_path) {
+        return SelfUpdateResult::Failed(format!(
+            "Failed to copy self to temp: {}",
+            e
+        ));
+    }
+
+    // Spawn the temp copy with --finish-update
+    match ProcessCommand::new(&updater_path)
+        .arg("--finish-update")
+        .arg(source_path)
+        .arg(target_path)
+        .spawn()
+    {
+        Ok(_) => SelfUpdateResult::Spawned,
+        Err(e) => SelfUpdateResult::Failed(format!(
+            "Failed to spawn updater: {}",
+            e
+        )),
+    }
+}
+
 /// Detect whether this is a Tauri project by checking for src-tauri/Cargo.toml
 /// and tauri.conf.json (or .json5) in the src-tauri directory.
 fn detect_project_type(project_dir: &Path) -> ProjectType {
@@ -464,6 +537,8 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     let mut copied_count = 0;
     let mut copied_binaries: Vec<String> = Vec::new();
     let mut failed_binaries: Vec<FailedCopy> = Vec::new();
+    // Track if we need to self-update (deferred until after all copies attempted)
+    let mut pending_self_update: Option<(PathBuf, PathBuf)> = None;
 
     let source_dir = rust_base_dir.join("target").join(profile.artifact_dir());
 
@@ -487,25 +562,110 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
                 copied_binaries.push(exe_name);
             }
             Err(e) => {
-                let error_msg = format!(
-                    "Failed to copy {} to {}: {}",
-                    source_path.display(),
-                    target_path.display(),
-                    e
-                );
-                if emit_text {
-                    eprintln!(
-                        "{} {} {}",
-                        "Failed".bold().bright_red(),
-                        exe_name.bold().yellow(),
-                        format!("-> {}: {}", target_path.display(), e).dimmed()
+                // Check if this is a self-update scenario
+                if is_self_update_target(&target_path) {
+                    // Defer self-update until after all other copies
+                    if emit_text {
+                        println!(
+                            "{} {} {}",
+                            "Deferred".bold().cyan(),
+                            exe_name.bold().cyan(),
+                            "(self-update will be attempted after other copies)".dimmed()
+                        );
+                    }
+                    pending_self_update = Some((source_path, target_path));
+                } else {
+                    // Normal copy failure
+                    let error_msg = format!(
+                        "Failed to copy {} to {}: {}",
+                        source_path.display(),
+                        target_path.display(),
+                        e
                     );
+                    if emit_text {
+                        eprintln!(
+                            "{} {} {}",
+                            "Failed".bold().bright_red(),
+                            exe_name.bold().yellow(),
+                            format!("-> {}: {}", target_path.display(), e).dimmed()
+                        );
+                    }
+                    failed_binaries.push(FailedCopy {
+                        binary: exe_name,
+                        error: error_msg,
+                    });
                 }
-                failed_binaries.push(FailedCopy {
-                    binary: exe_name,
-                    error: error_msg,
-                });
             }
+        }
+    }
+
+    // Handle pending self-update after all other copies
+    if let Some((source_path, target_path)) = pending_self_update {
+        let exe_name = target_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Only attempt self-update if there were no other failures
+        if failed_binaries.is_empty() {
+            match try_self_update(&source_path, &target_path) {
+                SelfUpdateResult::Spawned => {
+                    if emit_text {
+                        println!(
+                            "{} {}",
+                            "Self-update:".bold().cyan(),
+                            "Spawned updater process. Update will complete momentarily.".dimmed()
+                        );
+                    }
+                    // Return Ok so the process exits cleanly
+                    return Ok(());
+                }
+                SelfUpdateResult::Failed(msg) => {
+                    let error_msg = format!(
+                        "Failed to self-update {} to {}: {}",
+                        source_path.display(),
+                        target_path.display(),
+                        msg
+                    );
+                    if emit_text {
+                        eprintln!(
+                            "{} {} {}",
+                            "Failed".bold().bright_red(),
+                            exe_name.bold().yellow(),
+                            format!("-> {}: {}", target_path.display(), msg).dimmed()
+                        );
+                    }
+                    failed_binaries.push(FailedCopy {
+                        binary: exe_name,
+                        error: error_msg,
+                    });
+                }
+                SelfUpdateResult::NotApplicable => {
+                    // Shouldn't happen since we already checked, but handle it
+                    let error_msg = format!(
+                        "Failed to copy {} to {}: file in use",
+                        source_path.display(),
+                        target_path.display()
+                    );
+                    failed_binaries.push(FailedCopy {
+                        binary: exe_name,
+                        error: error_msg,
+                    });
+                }
+            }
+        } else {
+            // There were other failures - don't attempt self-update, just report it
+            if emit_text {
+                eprintln!(
+                    "{} {}",
+                    "Skipped self-update:".bold().yellow(),
+                    "Fix other copy failures first, then re-run.".dimmed()
+                );
+            }
+            failed_binaries.push(FailedCopy {
+                binary: exe_name,
+                error: "Self-update skipped due to other failures".to_string(),
+            });
         }
     }
 
