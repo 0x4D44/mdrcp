@@ -61,10 +61,12 @@ impl BuildProfile {
         }
     }
 
-    fn cargo_hint(self) -> &'static str {
-        match self {
-            BuildProfile::Release => "cargo build --release",
-            BuildProfile::Debug => "cargo build",
+    fn cargo_hint(self, project_type: ProjectType) -> &'static str {
+        match (self, project_type) {
+            (BuildProfile::Release, ProjectType::Tauri) => "cargo tauri build",
+            (BuildProfile::Debug, ProjectType::Tauri) => "cargo tauri build --debug",
+            (BuildProfile::Release, ProjectType::Standard) => "cargo build --release",
+            (BuildProfile::Debug, ProjectType::Standard) => "cargo build",
         }
     }
 }
@@ -487,7 +489,7 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         anyhow::bail!(
             "No built {} executables found. Have you run '{}'?",
             profile.label(),
-            profile.cargo_hint()
+            profile.cargo_hint(project_type)
         );
     }
 
