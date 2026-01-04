@@ -129,6 +129,10 @@ pub enum Command {
     Deploy(RunOptions),
     ShowHelp,
     ShowVersion,
+    FinishUpdate {
+        source: PathBuf,
+        dest: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,6 +159,14 @@ pub fn parse_args(args: &[String]) -> Result<Command, ParseError> {
             "-V" | "--version" => return Ok(Command::ShowVersion),
             _ => {}
         }
+    }
+
+    // Internal command for self-update: --finish-update <source> <dest>
+    if args.len() == 3 && args[0] == "--finish-update" {
+        return Ok(Command::FinishUpdate {
+            source: PathBuf::from(&args[1]),
+            dest: PathBuf::from(&args[2]),
+        });
     }
 
     let mut options = RunOptions::default();
