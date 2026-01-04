@@ -381,7 +381,7 @@ fn test_tauri_detected_output() {
     )
     .unwrap();
     create_and_write_file(
-        &temp_dir.path().join("tauri.conf.json"),
+        &src_tauri.join("tauri.conf.json"),
         r#"{"productName": "App"}"#,
     )
     .unwrap();
@@ -853,7 +853,7 @@ fn test_tauri_auto_detect_and_deploy() {
     )
     .unwrap();
     create_and_write_file(
-        &temp_project.path().join("tauri.conf.json"),
+        &src_tauri.join("tauri.conf.json"),
         r#"{"productName": "My Tauri App"}"#,
     )
     .unwrap();
@@ -895,7 +895,7 @@ fn test_tauri_with_product_name_from_config() {
     .unwrap();
     // productName differs from Cargo.toml package name
     create_and_write_file(
-        &temp_project.path().join("tauri.conf.json"),
+        &src_tauri.join("tauri.conf.json"),
         r#"{"productName": "MyApp"}"#,
     )
     .unwrap();
@@ -935,7 +935,7 @@ fn test_tauri_debug_profile() {
         "[package]\nname=\"debug-app\"\nversion=\"0.1.0\"",
     )
     .unwrap();
-    create_and_write_file(&temp_project.path().join("tauri.conf.json"), "{}").unwrap();
+    create_and_write_file(&src_tauri.join("tauri.conf.json"), "{}").unwrap();
 
     // Create the debug executable (not release)
     let dbg = src_tauri.join("target").join("debug");
@@ -1008,7 +1008,7 @@ fn test_no_tauri_flag_uses_root_cargo() {
         "[package]\nname=\"tauri-app\"\nversion=\"0.1.0\"",
     )
     .unwrap();
-    create_and_write_file(&temp_project.path().join("tauri.conf.json"), "{}").unwrap();
+    create_and_write_file(&src_tauri.join("tauri.conf.json"), "{}").unwrap();
 
     // Create release executable in root target (not src-tauri/target)
     let rel = temp_project.path().join("target").join("release");

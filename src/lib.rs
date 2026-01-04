@@ -325,11 +325,11 @@ fn default_target_dir() -> Result<PathBuf> {
 }
 
 /// Detect whether this is a Tauri project by checking for src-tauri/Cargo.toml
-/// and tauri.conf.json (or .json5) in the project root.
+/// and tauri.conf.json (or .json5) in the src-tauri directory.
 fn detect_project_type(project_dir: &Path) -> ProjectType {
     let tauri_cargo = project_dir.join("src-tauri").join("Cargo.toml");
-    let tauri_conf = project_dir.join("tauri.conf.json");
-    let tauri_conf5 = project_dir.join("tauri.conf.json5");
+    let tauri_conf = project_dir.join("src-tauri").join("tauri.conf.json");
+    let tauri_conf5 = project_dir.join("src-tauri").join("tauri.conf.json5");
 
     if tauri_cargo.exists() && (tauri_conf.exists() || tauri_conf5.exists()) {
         ProjectType::Tauri
@@ -342,8 +342,8 @@ fn detect_project_type(project_dir: &Path) -> ProjectType {
 /// Returns None if file doesn't exist or productName is not set.
 fn read_tauri_product_name(project_dir: &Path) -> Option<String> {
     let conf_paths = [
-        project_dir.join("tauri.conf.json"),
-        project_dir.join("tauri.conf.json5"),
+        project_dir.join("src-tauri").join("tauri.conf.json"),
+        project_dir.join("src-tauri").join("tauri.conf.json5"),
     ];
 
     for conf_path in &conf_paths {
@@ -709,18 +709,20 @@ mod tests {
     fn test_read_tauri_product_name_failures() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
+        let src_tauri = root.join("src-tauri");
+        std::fs::create_dir_all(&src_tauri).unwrap();
 
         // 1. Invalid JSON
-        std::fs::write(root.join("tauri.conf.json"), "{ invalid }").unwrap();
+        std::fs::write(src_tauri.join("tauri.conf.json"), "{ invalid }").unwrap();
         assert!(read_tauri_product_name(root).is_none());
 
         // 2. Valid JSON, missing productName
-        std::fs::write(root.join("tauri.conf.json"), r#"{ "foo": "bar" }"#).unwrap();
+        std::fs::write(src_tauri.join("tauri.conf.json"), r#"{ "foo": "bar" }"#).unwrap();
         assert!(read_tauri_product_name(root).is_none());
 
         // 3. Valid JSON, missing productName in package
         std::fs::write(
-            root.join("tauri.conf.json"),
+            src_tauri.join("tauri.conf.json"),
             r#"{ "package": { "version": "1.0" } }"#,
         )
         .unwrap();
