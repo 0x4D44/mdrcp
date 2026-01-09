@@ -3,6 +3,7 @@ use owo_colors::OwoColorize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use toml::Value;
@@ -12,9 +13,8 @@ const UPDATER_TEMP_NAME: &str = "mdrcp_updater.exe";
 pub mod cli;
 
 pub use cli::{
-    parse_args, print_help, print_parse_error, print_version_banner, Command, ParseError,
+    parse_args, write_help, write_parse_error, write_version_banner, Command, ParseError,
 };
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SummaryFormat {
     #[default]
@@ -173,17 +173,26 @@ struct FailedCopy {
 }
 
 pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
-    match run_with_options(cwd, options) {
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    let mut ctx = CliContext::new(&mut stdout, &mut stderr);
+    match run_with_options(cwd, options, &mut ctx) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", "Error:".bold().bright_red(), e);
-            eprintln!();
-            eprintln!("{} {}", "Usage:".bold().yellow(), "mdrcp [OPTIONS]".bold());
+            let _ = writeln!(ctx.stderr, "{} {}", "Error:".bold().bright_red(), e);
+            let _ = writeln!(ctx.stderr);
+            let _ = writeln!(
+                ctx.stderr,
+                "{} {}",
+                "Usage:".bold().yellow(),
+                "mdrcp [OPTIONS]".bold()
+            );
             let hint = match default_target_dir() {
                 Ok(p) => p.display().to_string(),
                 Err(_) => HINT_DEFAULT.to_string(),
             };
-            eprintln!(
+            let _ = writeln!(
+                ctx.stderr,
                 "{} {} {}",
                 "Hint:".bold().cyan(),
                 format!(
@@ -193,8 +202,14 @@ pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
                 .dimmed(),
                 hint.bold().bright_white()
             );
-            eprintln!("{} {}", "More info:".bold().cyan(), "mdrcp --help".bold());
-            eprintln!(
+            let _ = writeln!(
+                ctx.stderr,
+                "{} {}",
+                "More info:".bold().cyan(),
+                "mdrcp --help".bold()
+            );
+            let _ = writeln!(
+                ctx.stderr,
                 "{} {}",
                 "Docs:".bold().cyan(),
                 "See README.md troubleshooting section".dimmed()
@@ -207,7 +222,6 @@ pub fn do_main_with_options(cwd: &Path, options: &RunOptions) -> i32 {
 pub fn do_main(cwd: &Path) -> i32 {
     do_main_with_options(cwd, &RunOptions::default())
 }
-
 /// Extract candidate binary names from a manifest `Value`.
 /// Prefers `[[bin]].name`; falls back to `package.name` if no explicit bins.
 fn manifest_bin_names(manifest: &Value) -> Vec<String> {
@@ -330,10 +344,14 @@ fn default_target_dir() -> Result<PathBuf> {
 }
 
 /// Check if the target path is our own running executable
-fn is_self_update_target(target_path: &Path) -> bool {
-    let current_exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(_) => return false,
+fn is_self_update_target(target_path: &Path, current_exe_override: Option<&Path>) -> bool {
+    let current_exe = if let Some(p) = current_exe_override {
+        p.to_path_buf()
+    } else {
+        match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(_) => return false,
+        }
     };
     let current_exe_canonical = current_exe.canonicalize().unwrap_or(current_exe);
     let target_canonical = target_path
@@ -354,11 +372,19 @@ enum SelfUpdateResult {
 
 /// Check if we're trying to overwrite our own executable, and if so,
 /// spawn a temp copy to perform the update.
-fn try_self_update(source_path: &Path, target_path: &Path) -> SelfUpdateResult {
+fn try_self_update(
+    source_path: &Path,
+    target_path: &Path,
+    current_exe_override: Option<&Path>,
+) -> SelfUpdateResult {
     // Get canonical path of current executable
-    let current_exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(_) => return SelfUpdateResult::NotApplicable,
+    let current_exe = if let Some(p) = current_exe_override {
+        p.to_path_buf()
+    } else {
+        match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(_) => return SelfUpdateResult::NotApplicable,
+        }
     };
 
     // Canonicalize paths for comparison
@@ -378,10 +404,7 @@ fn try_self_update(source_path: &Path, target_path: &Path) -> SelfUpdateResult {
 
     // Copy current executable to temp location
     if let Err(e) = fs::copy(&current_exe_canonical, &updater_path) {
-        return SelfUpdateResult::Failed(format!(
-            "Failed to copy self to temp: {}",
-            e
-        ));
+        return SelfUpdateResult::Failed(format!("Failed to copy self to temp: {}", e));
     }
 
     // Spawn the temp copy with --finish-update
@@ -392,10 +415,7 @@ fn try_self_update(source_path: &Path, target_path: &Path) -> SelfUpdateResult {
         .spawn()
     {
         Ok(_) => SelfUpdateResult::Spawned,
-        Err(e) => SelfUpdateResult::Failed(format!(
-            "Failed to spawn updater: {}",
-            e
-        )),
+        Err(e) => SelfUpdateResult::Failed(format!("Failed to spawn updater: {}", e)),
     }
 }
 
@@ -441,8 +461,30 @@ fn read_tauri_product_name(project_dir: &Path) -> Option<String> {
     None
 }
 
+/// Execution context for IO and environment mocking
+pub struct CliContext<'a> {
+    pub stdout: &'a mut dyn Write,
+    pub stderr: &'a mut dyn Write,
+    /// Mock for std::env::current_exe()
+    pub current_exe: Option<PathBuf>,
+}
+
+impl<'a> CliContext<'a> {
+    pub fn new(stdout: &'a mut dyn Write, stderr: &'a mut dyn Write) -> Self {
+        Self {
+            stdout,
+            stderr,
+            current_exe: None,
+        }
+    }
+}
+
 /// Main deployment function that handles both single packages and workspaces
-pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> {
+pub fn run_with_options(
+    project_dir: &Path,
+    options: &RunOptions,
+    ctx: &mut CliContext,
+) -> Result<()> {
     // Determine project type: use explicit option or auto-detect
     let (project_type, auto_detected) = match options.project_type {
         Some(pt) => (pt, false),
@@ -523,17 +565,23 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         fs::create_dir_all(&target_dir).with_context(|| {
             format!("Failed to create target directory {}", target_dir.display())
         })?;
+    } else if !target_dir.is_dir() {
+        anyhow::bail!(
+            "Target path {} exists but is not a directory",
+            target_dir.display()
+        );
     }
 
     // Print project type if not quiet
     if emit_text && project_type == ProjectType::Tauri {
         let mode_indicator = if auto_detected { "[auto]" } else { "[--tauri]" };
-        println!(
+        writeln!(
+            ctx.stdout,
             "{} {} {}",
             "Detected".bold().cyan(),
             project_type.label().bold().bright_white(),
             format!("project {}", mode_indicator).dimmed()
-        );
+        )?;
     }
 
     let mut copied_count = 0;
@@ -550,53 +598,57 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         let source_path = source_dir.join(&exe_name);
         let target_path = target_dir.join(&exe_name);
 
+        // Check if this is a self-update scenario
+        if is_self_update_target(&target_path, ctx.current_exe.as_deref()) {
+            // Defer self-update until after all other copies
+            if emit_text {
+                writeln!(
+                    ctx.stdout,
+                    "{} {} {}",
+                    "Deferred".bold().cyan(),
+                    exe_name.bold().cyan(),
+                    "(self-update will be attempted after other copies)".dimmed()
+                )?;
+            }
+            pending_self_update = Some((source_path, target_path));
+            continue;
+        }
+
         match fs::copy(&source_path, &target_path) {
             Ok(_) => {
                 if emit_text {
-                    println!(
+                    writeln!(
+                        ctx.stdout,
                         "{} {} {}",
                         "Copied".bold().green(),
                         exe_name.bold().green(),
                         format!("-> {}", target_path.display()).dimmed()
-                    );
+                    )?;
                 }
                 copied_count += 1;
                 copied_binaries.push(exe_name);
             }
             Err(e) => {
-                // Check if this is a self-update scenario
-                if is_self_update_target(&target_path) {
-                    // Defer self-update until after all other copies
-                    if emit_text {
-                        println!(
-                            "{} {} {}",
-                            "Deferred".bold().cyan(),
-                            exe_name.bold().cyan(),
-                            "(self-update will be attempted after other copies)".dimmed()
-                        );
-                    }
-                    pending_self_update = Some((source_path, target_path));
-                } else {
-                    // Normal copy failure
-                    let error_msg = format!(
-                        "Failed to copy {} to {}: {}",
-                        source_path.display(),
-                        target_path.display(),
-                        e
-                    );
-                    if emit_text {
-                        eprintln!(
-                            "{} {} {}",
-                            "Failed".bold().bright_red(),
-                            exe_name.bold().yellow(),
-                            format!("-> {}: {}", target_path.display(), e).dimmed()
-                        );
-                    }
-                    failed_binaries.push(FailedCopy {
-                        binary: exe_name,
-                        error: error_msg,
-                    });
+                // Normal copy failure
+                let error_msg = format!(
+                    "Failed to copy {} to {}: {}",
+                    source_path.display(),
+                    target_path.display(),
+                    e
+                );
+                if emit_text {
+                    writeln!(
+                        ctx.stderr,
+                        "{} {} {}",
+                        "Failed".bold().bright_red(),
+                        exe_name.bold().yellow(),
+                        format!("-> {}: {}", target_path.display(), e).dimmed()
+                    )?;
                 }
+                failed_binaries.push(FailedCopy {
+                    binary: exe_name,
+                    error: error_msg,
+                });
             }
         }
     }
@@ -610,14 +662,15 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
 
         // Only attempt self-update if there were no other failures
         if failed_binaries.is_empty() {
-            match try_self_update(&source_path, &target_path) {
+            match try_self_update(&source_path, &target_path, ctx.current_exe.as_deref()) {
                 SelfUpdateResult::Spawned => {
                     if emit_text {
-                        println!(
+                        writeln!(
+                            ctx.stdout,
                             "{} {}",
                             "Self-update:".bold().cyan(),
                             "Spawned updater process. Update will complete momentarily.".dimmed()
-                        );
+                        )?;
                     }
                     // Return Ok so the process exits cleanly
                     return Ok(());
@@ -630,12 +683,13 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
                         msg
                     );
                     if emit_text {
-                        eprintln!(
+                        writeln!(
+                            ctx.stderr,
                             "{} {} {}",
                             "Failed".bold().bright_red(),
                             exe_name.bold().yellow(),
                             format!("-> {}: {}", target_path.display(), msg).dimmed()
-                        );
+                        )?;
                     }
                     failed_binaries.push(FailedCopy {
                         binary: exe_name,
@@ -658,11 +712,12 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         } else {
             // There were other failures - don't attempt self-update, just report it
             if emit_text {
-                eprintln!(
+                writeln!(
+                    ctx.stderr,
                     "{} {}",
                     "Skipped self-update:".bold().yellow(),
                     "Fix other copy failures first, then re-run.".dimmed()
-                );
+                )?;
             }
             failed_binaries.push(FailedCopy {
                 binary: exe_name,
@@ -672,24 +727,31 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
     }
 
     if emit_text {
-        println!();
-        println!(
+        writeln!(ctx.stdout)?;
+        writeln!(
+            ctx.stdout,
             "{}",
             format_deployment_summary(copied_count, &target_dir, override_used)
-        );
+        )?;
 
         // Report failures if any
         if !failed_binaries.is_empty() {
-            println!();
-            eprintln!(
+            writeln!(ctx.stdout)?;
+            writeln!(
+                ctx.stderr,
                 "{} {}",
                 "Failed to copy".bold().bright_red(),
                 format!("{} executable(s):", failed_binaries.len())
                     .bold()
                     .bright_red()
-            );
+            )?;
             for failed in &failed_binaries {
-                eprintln!("  {} {}", "•".bright_red(), failed.error.dimmed());
+                writeln!(
+                    ctx.stderr,
+                    "  {} {}",
+                    "•".bright_red(),
+                    failed.error.dimmed()
+                )?;
             }
         }
     }
@@ -699,11 +761,11 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
         let note = build_override_note(&raw, &target_dir, default_target.as_deref());
         if emit_text {
             for line in &note.lines {
-                println!("{}", line);
+                writeln!(ctx.stdout, "{}", line)?;
             }
         } else {
             for warning in &note.warnings {
-                eprintln!("Warning: {}", warning);
+                writeln!(ctx.stderr, "Warning: {}", warning)?;
             }
         }
         override_note = Some(note);
@@ -738,7 +800,7 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
                 .context("Failed to serialize deployment summary")?,
             SummaryFormat::Text => unreachable!(),
         };
-        println!("{}", summary_json);
+        writeln!(ctx.stdout, "{}", summary_json)?;
     }
 
     // Return error if any copies failed
@@ -759,9 +821,11 @@ pub fn run_with_options(project_dir: &Path, options: &RunOptions) -> Result<()> 
 }
 
 pub fn run(project_dir: &Path) -> Result<()> {
-    run_with_options(project_dir, &RunOptions::default())
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+    let mut ctx = CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(project_dir, &RunOptions::default(), &mut ctx)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,6 +929,79 @@ mod tests {
         assert!(names.contains(&"bin1".to_string()));
         assert!(names.contains(&"bin2".to_string()));
         assert!(names.contains(&"pkg".to_string()));
+    }
+
+    #[test]
+    fn test_manifest_bin_names_fallback_path() {
+        let toml_str = r#"
+            [package]
+            name = "pkg"
+            
+            [[bin]]
+            path = "src/bin/other.rs"
+
+            [[bin]]
+            # empty entry
+        "#;
+        let val: Value = toml::from_str(toml_str).unwrap();
+        let names = manifest_bin_names(&val);
+        assert!(names.contains(&"other".to_string()));
+        assert!(names.contains(&"pkg".to_string()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn test_find_built_executables_empty() {
+        let root = Path::new(".");
+        let data = Value::Table(toml::map::Map::new());
+        let res = find_built_executables(root, &data, BuildProfile::Release, &[]);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("No packages or bins found"));
+    }
+
+    #[test]
+    fn test_write_error_paths() {
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fail"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("fail"))
+            }
+        }
+        let mut fw1 = FailingWriter;
+        let mut fw2 = FailingWriter;
+        // Test various functions that write
+        let _ = write_help(&mut fw1);
+        let _ = write_version_banner(&mut fw1);
+        let _ = write_parse_error(&mut fw1, &ParseError::UnknownArgs(vec!["x".into()]));
+
+        let mut ctx = CliContext::new(&mut fw1, &mut fw2);
+        let opts = RunOptions {
+            project_type: Some(ProjectType::Tauri),
+            ..Default::default()
+        };
+        // This will likely fail early on first write
+        let _ = run_with_options(Path::new("."), &opts, &mut ctx);
+    }
+
+    #[test]
+    fn test_read_tauri_product_name_in_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let src_tauri = root.join("src-tauri");
+        std::fs::create_dir_all(&src_tauri).unwrap();
+
+        std::fs::write(
+            src_tauri.join("tauri.conf.json"),
+            r#"{ "package": { "productName": "InsidePkg" } }"#,
+        )
+        .unwrap();
+        assert_eq!(read_tauri_product_name(root), Some("InsidePkg".to_string()));
     }
 
     #[test]

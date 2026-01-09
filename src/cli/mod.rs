@@ -34,8 +34,8 @@ pub fn version_banner() -> String {
     )
 }
 
-pub fn print_version_banner() {
-    println!("{}", version_banner());
+pub fn write_version_banner(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    writeln!(writer, "{}", version_banner())
 }
 
 pub fn help_text() -> String {
@@ -120,19 +120,15 @@ pub fn help_text() -> String {
     lines.join("\n")
 }
 
-pub fn print_help() {
-    println!("{}", help_text());
+pub fn write_help(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    writeln!(writer, "{}", help_text())
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Deploy(RunOptions),
     ShowHelp,
     ShowVersion,
-    FinishUpdate {
-        source: PathBuf,
-        dest: PathBuf,
-    },
+    FinishUpdate { source: PathBuf, dest: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,53 +248,71 @@ fn parse_summary_format(value: &str) -> Option<SummaryFormat> {
     }
 }
 
-pub fn print_parse_error(error: &ParseError) {
+pub fn write_parse_error(
+    writer: &mut impl std::io::Write,
+    error: &ParseError,
+) -> std::io::Result<()> {
     match error {
         ParseError::UnknownArgs(args) => {
             if args.is_empty() {
-                return;
+                return Ok(());
             }
             let joined = args.join(" ");
-            eprintln!(
+            writeln!(
+                writer,
                 "{} {}",
                 "Unknown arguments:".bold().bright_red(),
                 joined.bold()
-            );
-            eprintln!(
+            )?;
+            writeln!(
+                writer,
                 "{} {}",
                 "Hint:".bold().cyan(),
                 "Run `mdrcp --help` for usage details.".dimmed()
-            );
+            )?;
         }
         ParseError::MissingValue { flag } => {
-            eprintln!("{} {}", "Missing value:".bold().bright_red(), flag.bold());
-            eprintln!(
+            writeln!(
+                writer,
+                "{} {}",
+                "Missing value:".bold().bright_red(),
+                flag.bold()
+            )?;
+            writeln!(
+                writer,
                 "{} {}",
                 "Hint:".bold().cyan(),
                 "Pass a directory after the flag, e.g. --target path/to/bin".dimmed()
-            );
-            eprintln!(
+            )?;
+            writeln!(
+                writer,
                 "{} {}",
                 "Relative paths:".bold().magenta(),
                 "Resolved against the project directory passed to the tool.".dimmed()
-            );
+            )?;
         }
         ParseError::InvalidValue {
             flag,
             value,
             expected,
         } => {
-            eprintln!(
+            writeln!(
+                writer,
                 "{} {} {}",
                 "Invalid value:".bold().bright_red(),
                 flag.bold(),
                 value.bold()
-            );
-            eprintln!("{} {}", "Accepted:".bold().cyan(), expected.join(", "));
+            )?;
+            writeln!(
+                writer,
+                "{} {}",
+                "Accepted:".bold().cyan(),
+                expected.join(", ")
+            )?;
         }
     }
+    Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,6 +552,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_finish_update() {
+        let args = vec![
+            "--finish-update".to_string(),
+            "source/path".to_string(),
+            "dest/path".to_string(),
+        ];
+        let cmd = parse_args(&args).unwrap();
+        match cmd {
+            Command::FinishUpdate { source, dest } => {
+                assert_eq!(source, PathBuf::from("source/path"));
+                assert_eq!(dest, PathBuf::from("dest/path"));
+            }
+            _ => panic!("Expected FinishUpdate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_args_summary_equals_invalid() {
+        let err = parse_args(&["--summary=invalid".to_string()]).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { flag, .. } if flag == "--summary"));
+    }
+
+    #[test]
     fn test_parse_args_tauri_with_debug() {
         let cmd = parse_args(&["--tauri".to_string(), "--debug".to_string()]).unwrap();
         match cmd {
@@ -559,27 +596,41 @@ mod tests {
 
     #[test]
     fn test_print_functions_run_without_panic() {
-        // These just ensure the code paths are hit; we don't capture stdout here.
-        print_help();
-        print_version_banner();
+        // These just ensure the code paths are hit; we capture to a sink.
+        let mut sink = Vec::new();
+        write_help(&mut sink).unwrap();
+        write_version_banner(&mut sink).unwrap();
     }
 
     #[test]
     fn test_print_parse_errors() {
+        let mut sink = Vec::new();
         // Exercise the display logic for different error variants
-        print_parse_error(&ParseError::UnknownArgs(vec!["--bad".to_string()]));
+        write_parse_error(
+            &mut sink,
+            &ParseError::UnknownArgs(vec!["--bad".to_string()]),
+        )
+        .unwrap();
 
-        print_parse_error(&ParseError::MissingValue {
-            flag: "--target".to_string(),
-        });
+        write_parse_error(
+            &mut sink,
+            &ParseError::MissingValue {
+                flag: "--target".to_string(),
+            },
+        )
+        .unwrap();
 
-        print_parse_error(&ParseError::InvalidValue {
-            flag: "--summary".to_string(),
-            value: "xml".to_string(),
-            expected: &["text", "json"],
-        });
+        write_parse_error(
+            &mut sink,
+            &ParseError::InvalidValue {
+                flag: "--summary".to_string(),
+                value: "xml".to_string(),
+                expected: &["text", "json"],
+            },
+        )
+        .unwrap();
 
         // Edge case: UnknownArgs empty (should return early, but good to test)
-        print_parse_error(&ParseError::UnknownArgs(vec![]));
+        write_parse_error(&mut sink, &ParseError::UnknownArgs(vec![])).unwrap();
     }
 }
