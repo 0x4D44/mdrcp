@@ -7,18 +7,21 @@ fn main() {
     cleanup_old_updater();
 
     let args: Vec<String> = env::args().skip(1).collect();
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
+
     match mdrcp::parse_args(&args) {
         Ok(mdrcp::Command::ShowHelp) => {
-            mdrcp::print_help();
+            let _ = mdrcp::write_help(&mut stdout);
             process::exit(0);
         }
         Ok(mdrcp::Command::ShowVersion) => {
-            mdrcp::print_version_banner();
+            let _ = mdrcp::write_version_banner(&mut stdout);
             process::exit(0);
         }
         Ok(mdrcp::Command::Deploy(options)) => {
             if !options.quiet {
-                mdrcp::print_version_banner();
+                let _ = mdrcp::write_version_banner(&mut stdout);
             }
             process::exit(mdrcp::do_main_with_options(Path::new("."), &options));
         }
@@ -26,7 +29,7 @@ fn main() {
             process::exit(finish_update(&source, &dest));
         }
         Err(err) => {
-            mdrcp::print_parse_error(&err);
+            let _ = mdrcp::write_parse_error(&mut stderr, &err);
             process::exit(1);
         }
     }

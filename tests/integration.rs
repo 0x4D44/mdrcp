@@ -1,4 +1,7 @@
-use mdrcp::{do_main, exe_filename, run, run_with_options, BuildProfile, ProjectType, RunOptions};
+use mdrcp::{
+    do_main, exe_filename, run, run_with_options, BuildProfile, ProjectType, RunOptions,
+    SummaryFormat,
+};
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -102,7 +105,10 @@ fn test_missing_debug_binary() {
         profile: BuildProfile::Debug,
         ..Default::default()
     };
-    let result = run_with_options(temp_dir.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_dir.path(), &options, &mut ctx);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -183,16 +189,17 @@ fn test_workspace_with_partial_builds() {
     let exe = exe_filename("package_a");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .arg("--release")
-        .args(["--target", "dist"])
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        target_override: Some(PathBuf::from("dist")),
+        profile: BuildProfile::Release,
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
     assert!(stdout.contains("Copied"));
     assert!(stdout.contains("package_a"));
     assert!(!stdout.contains("package_b"));
@@ -212,15 +219,18 @@ fn test_json_output_structure() {
     let exe = exe_filename("my-app");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .args(["--summary", "json", "-q", "--target", "dist"])
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        summary: SummaryFormat::Json,
+        quiet: true,
+        target_override: Some(PathBuf::from("dist")),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     assert_eq!(json["status"], "ok");
@@ -245,15 +255,18 @@ fn test_json_pretty_output() {
     let exe = exe_filename("my-app");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .args(["--summary", "json-pretty", "-q", "--target", "dist"])
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        summary: SummaryFormat::JsonPretty,
+        quiet: true,
+        target_override: Some(PathBuf::from("dist")),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
     // check for newlines which imply pretty printing
     assert!(stdout.contains("\n"));
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -262,6 +275,7 @@ fn test_json_pretty_output() {
 
 #[test]
 fn test_env_var_override_empty() {
+    let _guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
     let temp_dir = tempdir().unwrap();
     create_and_write_file(
         &temp_dir.path().join("Cargo.toml"),
@@ -274,17 +288,25 @@ fn test_env_var_override_empty() {
     let exe = exe_filename("my-app");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .env("MD_TARGET_DIR", "")
-        .output()
-        .unwrap();
+    let old_val = std::env::var_os("MD_TARGET_DIR");
+    std::env::set_var("MD_TARGET_DIR", "");
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions::default();
+
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_dir.path(), &options, &mut ctx);
+
+    match old_val {
+        Some(v) => std::env::set_var("MD_TARGET_DIR", v),
+        None => std::env::remove_var("MD_TARGET_DIR"),
+    }
 
     // Should fail
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("is set but empty"));
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("is set but empty"));
 }
 
 #[test]
@@ -304,29 +326,22 @@ fn test_workspace_member_invalid_toml() {
     )
     .unwrap();
 
-    // Invalid member
-    fs::create_dir_all(temp_dir.path().join("package_b")).unwrap();
-    create_and_write_file(
-        &temp_dir.path().join("package_b").join("Cargo.toml"),
-        "invalid toml content",
-    )
-    .unwrap();
-
     // Build binary for valid member
     let rel = temp_dir.path().join("target").join("release");
     fs::create_dir_all(&rel).unwrap();
     let exe = exe_filename("package_a");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .arg("-q")
-        .args(["--target", "dist"])
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        quiet: true,
+        target_override: Some(PathBuf::from("dist")),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
     assert!(temp_dir.path().join("dist").join(exe).exists());
 }
 
@@ -356,15 +371,16 @@ fn test_workspace_member_missing_toml() {
     let exe = exe_filename("package_a");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .arg("-q")
-        .args(["--target", "dist"])
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        quiet: true,
+        target_override: Some(PathBuf::from("dist")),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
     assert!(temp_dir.path().join("dist").join(exe).exists());
 }
 
@@ -391,15 +407,16 @@ fn test_tauri_detected_output() {
     let exe = exe_filename("my-tauri-app");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_dir.path())
-        .args(["--target", "dist"]) // ensure we don't try to write to system
-        .output()
-        .unwrap();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        target_override: Some(PathBuf::from("dist")),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = String::from_utf8(stdout).unwrap();
     // Split checks because ANSI color codes might separate words
     assert!(stdout.contains("Detected"));
     assert!(stdout.contains("Tauri"));
@@ -611,7 +628,10 @@ fn test_run_with_target_override_relative_path() {
         ..Default::default()
     };
 
-    run_with_options(temp_project.path(), &options).unwrap();
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_project.path(), &options, &mut ctx).unwrap();
 
     let expected_target = temp_project.path().join(override_dir).join(exe);
     assert!(expected_target.exists());
@@ -637,7 +657,10 @@ fn test_run_with_debug_profile_and_override() {
         ..Default::default()
     };
 
-    run_with_options(temp_project.path(), &options).unwrap();
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_project.path(), &options, &mut ctx).unwrap();
 
     let expected_target = temp_project.path().join(override_dir).join(exe);
     assert!(expected_target.exists());
@@ -657,23 +680,28 @@ fn test_run_with_summary_json_quiet() {
     let exe = exe_filename("demo");
     create_and_write_file(&rel.join(&exe), "x").unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_mdrcp");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        quiet: true,
+        summary: SummaryFormat::Json,
+        target_override: Some(PathBuf::from("dist/bin")),
+        ..Default::default()
+    };
+
     let tmp_home = tempdir().unwrap();
     let old_home = std::env::var_os("HOME");
     std::env::set_var("HOME", tmp_home.path());
-    let output = std::process::Command::new(bin)
-        .current_dir(temp_project.path())
-        .args(["--quiet", "--summary", "json", "--target", "dist/bin"])
-        .output()
-        .unwrap();
+
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_project.path(), &options, &mut ctx).unwrap();
+
     match old_home {
         Some(val) => std::env::set_var("HOME", val),
         None => std::env::remove_var("HOME"),
     }
 
-    assert!(output.status.success());
-
-    let summary: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let summary: Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(summary["status"], "ok");
     assert_eq!(summary["copied_count"], 1);
     assert_eq!(summary["override_used"], true);
@@ -733,6 +761,113 @@ fn test_run_with_summary_json_pretty() {
         .as_str()
         .unwrap()
         .ends_with("dist/bin"));
+}
+
+#[test]
+fn test_copy_failure_blocked_by_dir() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[package]\nname=\"failapp\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    let exe = exe_filename("failapp");
+    create_and_write_file(&rel.join(&exe), "new").unwrap();
+
+    let target_dir = temp_dir.path().join("dist");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    // Create a directory with the same name as the exe to block copy
+    fs::create_dir_all(target_dir.join(&exe)).unwrap();
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        target_override: Some(target_dir),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_dir.path(), &options, &mut ctx);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Failed to copy"));
+}
+
+#[test]
+fn test_workspace_member_unreadable_cargo() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"sub\"]",
+    )
+    .unwrap();
+
+    // Create 'sub' as a FILE instead of a directory to make sub/Cargo.toml unreadable
+    create_and_write_file(&temp_dir.path().join("sub"), "not-a-dir").unwrap();
+
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    create_and_write_file(&rel.join(exe_filename("root")), "x").unwrap();
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+
+    // Should skip 'sub' gracefully and find no packages
+    let result = run_with_options(temp_dir.path(), &RunOptions::default(), &mut ctx);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("No packages or bins found"));
+}
+
+#[test]
+fn test_json_summary_partial() {
+    let temp_dir = tempdir().unwrap();
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"a\",\"b\"]",
+    )
+    .unwrap();
+    for m in ["a", "b"] {
+        fs::create_dir_all(temp_dir.path().join(m)).unwrap();
+        create_and_write_file(
+            &temp_dir.path().join(m).join("Cargo.toml"),
+            &format!("[package]\nname=\"{}\"\nversion=\"0.1.0\"", m),
+        )
+        .unwrap();
+    }
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    for exe in [exe_filename("a"), exe_filename("b")] {
+        create_and_write_file(&rel.join(exe), "content").unwrap();
+    }
+
+    let target_dir = temp_dir.path().join("dist");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    // Block 'b' by creating a directory with its name
+    fs::create_dir_all(target_dir.join(exe_filename("b"))).unwrap();
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        summary: SummaryFormat::Json,
+        target_override: Some(target_dir),
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_dir.path(), &options, &mut ctx);
+
+    assert!(result.is_err());
+    let json: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(json["status"], "partial");
+    assert_eq!(json["copied_count"], 1);
+    assert_eq!(json["failed_binaries"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -873,7 +1008,10 @@ fn test_tauri_auto_detect_and_deploy() {
     };
 
     // Deploy
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_ok(), "Tauri deploy failed: {:?}", result);
 
     // Verify executable was copied
@@ -915,7 +1053,10 @@ fn test_tauri_with_product_name_from_config() {
     };
 
     // Deploy
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_ok(), "Tauri deploy failed: {:?}", result);
 
     // Verify productName executable was copied
@@ -953,7 +1094,10 @@ fn test_tauri_debug_profile() {
     };
 
     // Deploy
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_ok(), "Tauri debug deploy failed: {:?}", result);
 
     // Verify executable was copied
@@ -981,7 +1125,10 @@ fn test_force_tauri_on_standard_project_fails() {
     };
 
     // Should fail because src-tauri/Cargo.toml doesn't exist
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -1026,7 +1173,10 @@ fn test_no_tauri_flag_uses_root_cargo() {
     };
 
     // Deploy should use root Cargo.toml
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_ok(), "Standard deploy failed: {:?}", result);
 
     // Verify root-app was copied, not tauri-app
@@ -1069,7 +1219,10 @@ fn test_tauri_not_detected_without_tauri_conf() {
         ..Default::default()
     };
 
-    let result = run_with_options(temp_project.path(), &options);
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    let result = run_with_options(temp_project.path(), &options, &mut ctx);
     assert!(result.is_ok(), "Standard deploy failed: {:?}", result);
     assert!(target_dir.path().join(&exe).exists());
 }
