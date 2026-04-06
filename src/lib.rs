@@ -13,7 +13,8 @@ const UPDATER_TEMP_NAME: &str = "mdrcp_updater.exe";
 pub mod cli;
 
 pub use cli::{
-    parse_args, write_help, write_parse_error, write_version_banner, Command, ParseError,
+    parse_args, write_deploy_banner, write_help, write_parse_error, write_version_banner, Command,
+    ParseError,
 };
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SummaryFormat {
@@ -97,6 +98,13 @@ const HINT_DEFAULT: &str = r"c:\apps";
 const HINT_DEFAULT: &str = "~/.local/bin";
 
 const TARGET_OVERRIDE_ENV: &str = "MD_TARGET_DIR";
+
+fn format_file_mtime(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let datetime = time::OffsetDateTime::from(modified);
+    let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+    datetime.format(fmt).ok()
+}
 
 fn format_deployment_summary(count: usize, target_dir: &Path, override_used: bool) -> String {
     let base = format!(
@@ -614,15 +622,21 @@ pub fn run_with_options(
             continue;
         }
 
+        let source_mtime = format_file_mtime(&source_path);
+
         match fs::copy(&source_path, &target_path) {
             Ok(_) => {
                 if emit_text {
+                    let mtime_str = source_mtime
+                        .as_deref()
+                        .unwrap_or("unknown");
                     writeln!(
                         ctx.stdout,
-                        "{} {} {}",
+                        "{} {} {} {}",
                         "Copied".bold().green(),
                         exe_name.bold().green(),
-                        format!("-> {}", target_path.display()).dimmed()
+                        format!("-> {}", target_path.display()).dimmed(),
+                        format!("({})", mtime_str).dimmed()
                     )?;
                 }
                 copied_count += 1;

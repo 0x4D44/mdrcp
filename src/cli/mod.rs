@@ -1,5 +1,6 @@
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
+use time::{macros::format_description, OffsetDateTime};
 
 use super::{BuildProfile, ProjectType, RunOptions, SummaryFormat};
 
@@ -36,6 +37,23 @@ pub fn version_banner() -> String {
 
 pub fn write_version_banner(writer: &mut impl std::io::Write) -> std::io::Result<()> {
     writeln!(writer, "{}", version_banner())
+}
+
+pub fn deploy_banner() -> String {
+    let meta = version_metadata();
+    let now = OffsetDateTime::now_utc();
+    let fmt = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+    let timestamp = now.format(fmt).unwrap_or_else(|_| "unknown".to_string());
+    format!(
+        "{} {} {}",
+        meta.name.bold().bright_white(),
+        format!("v{}", meta.version).bright_blue().bold(),
+        timestamp.dimmed()
+    )
+}
+
+pub fn write_deploy_banner(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    writeln!(writer, "{}", deploy_banner())
 }
 
 pub fn help_text() -> String {
