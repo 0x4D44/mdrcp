@@ -21,7 +21,7 @@ fn main() {
         }
         Ok(mdrcp::Command::Deploy(options)) => {
             if !options.quiet {
-                let _ = mdrcp::write_version_banner(&mut stdout);
+                let _ = mdrcp::write_deploy_banner(&mut stdout);
             }
             process::exit(mdrcp::do_main_with_options(Path::new("."), &options));
         }

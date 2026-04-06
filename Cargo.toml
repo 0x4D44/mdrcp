@@ -1,6 +1,6 @@
 [package]
 name = "mdrcp"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,6 +11,7 @@ anyhow = "1.0"
 owo-colors = "4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dev-dependencies]
 tempfile = "3.8"
