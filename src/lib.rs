@@ -259,6 +259,30 @@ fn manifest_bin_names(manifest: &Value) -> Vec<String> {
     names
 }
 
+/// Expand a workspace member pattern into concrete directory paths.
+/// If the pattern contains glob characters (`*`, `?`, `[`), it is expanded
+/// via glob matching. Otherwise it is treated as a literal directory path.
+fn expand_workspace_member(base: &Path, pattern: &str) -> Vec<PathBuf> {
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        let full_pattern = base.join(pattern);
+        let pattern_str = full_pattern.to_string_lossy();
+        match glob::glob(&pattern_str) {
+            Ok(paths) => paths
+                .filter_map(|entry| entry.ok())
+                .filter(|p| p.is_dir())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        let dir = base.join(pattern);
+        if dir.is_dir() {
+            vec![dir]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 /// Find all built executables from workspace members or single package.
 /// Returns the base names of executables (without `.exe`).
 /// `rust_base_dir` is the directory containing Cargo.toml and target/.
@@ -281,25 +305,28 @@ fn find_built_executables(
         candidate_names.insert(name.clone());
     }
 
-    // Workspace members (if any)
+    // Workspace members (if any). Member entries may contain glob patterns
+    // (e.g. "crates/*") which Cargo expands to matching directories.
     if let Some(members) = cargo_data
         .get("workspace")
         .and_then(|ws| ws.get("members"))
         .and_then(|m| m.as_array())
     {
         for member in members {
-            let Some(member_path) = member.as_str() else {
+            let Some(member_pattern) = member.as_str() else {
                 continue;
             };
-            let member_manifest_path = rust_base_dir.join(member_path).join("Cargo.toml");
-            let Ok(contents) = fs::read_to_string(&member_manifest_path) else {
-                continue;
-            };
-            let Ok(member_data) = toml::from_str::<Value>(&contents) else {
-                continue;
-            };
-            for name in manifest_bin_names(&member_data) {
-                candidate_names.insert(name);
+            for member_dir in expand_workspace_member(rust_base_dir, member_pattern) {
+                let member_manifest_path = member_dir.join("Cargo.toml");
+                let Ok(contents) = fs::read_to_string(&member_manifest_path) else {
+                    continue;
+                };
+                let Ok(member_data) = toml::from_str::<Value>(&contents) else {
+                    continue;
+                };
+                for name in manifest_bin_names(&member_data) {
+                    candidate_names.insert(name);
+                }
             }
         }
     }

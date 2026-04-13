@@ -506,6 +506,49 @@ fn test_workspace_members_with_invalid_entries_are_ignored() {
 }
 
 #[test]
+fn test_workspace_glob_members() {
+    let temp_dir = tempdir().unwrap();
+    // Use glob pattern like Cargo workspaces: members = ["crates/*"]
+    create_and_write_file(
+        &temp_dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"crates/*\"]",
+    )
+    .unwrap();
+
+    // Create crates/alpha and crates/beta under the glob pattern
+    for m in ["alpha", "beta"] {
+        let crate_dir = temp_dir.path().join("crates").join(m);
+        fs::create_dir_all(&crate_dir).unwrap();
+        create_and_write_file(
+            &crate_dir.join("Cargo.toml"),
+            &format!("[package]\nname=\"{}\"\nversion=\"0.1.0\"", m),
+        )
+        .unwrap();
+    }
+
+    // Build executables for both
+    let rel = temp_dir.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    for exe in [exe_filename("alpha"), exe_filename("beta")] {
+        create_and_write_file(&rel.join(exe), "x").unwrap();
+    }
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let options = RunOptions {
+        target_override: Some(PathBuf::from("dist")),
+        profile: BuildProfile::Release,
+        ..Default::default()
+    };
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
+
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.contains("alpha"), "expected alpha in output: {stdout}");
+    assert!(stdout.contains("beta"), "expected beta in output: {stdout}");
+}
+
+#[test]
 fn test_workspace_no_built_executables() {
     let temp_dir = tempdir().unwrap();
     create_and_write_file(

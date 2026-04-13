@@ -1,11 +1,12 @@
 [package]
 name = "mdrcp"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+glob = "0.3"
 toml = "0.7"
 anyhow = "1.0"
 owo-colors = "4"
