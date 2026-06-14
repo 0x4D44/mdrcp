@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -263,6 +263,37 @@ fn manifest_bin_names(manifest: &Value) -> Vec<String> {
     names
 }
 
+/// Extract the package version from a manifest, resolving workspace inheritance.
+/// Returns the literal `[package].version` string, or—if the manifest declares
+/// `version.workspace = true`—the version from the workspace root's
+/// `[workspace.package].version`. `workspace_root` is the top-level workspace
+/// manifest; pass the manifest itself when it *is* the root. Returns `None` when
+/// no version can be resolved.
+fn package_version(manifest: &Value, workspace_root: &Value) -> Option<String> {
+    let version = manifest.get("package")?.get("version")?;
+    if let Some(literal) = version.as_str() {
+        return Some(literal.to_string());
+    }
+    // `version.workspace = true` -> inherit from [workspace.package].version
+    if version.get("workspace").and_then(Value::as_bool) == Some(true) {
+        return workspace_root
+            .get("workspace")?
+            .get("package")?
+            .get("version")?
+            .as_str()
+            .map(str::to_string);
+    }
+    None
+}
+
+/// A built executable discovered from the manifest, paired with its package
+/// version (resolving workspace inheritance) when one is available.
+#[derive(Debug)]
+struct BuiltBinary {
+    base_name: String,
+    version: Option<String>,
+}
+
 /// Expand a workspace member pattern into concrete directory paths.
 /// If the pattern contains glob characters (`*`, `?`, `[`), it is expanded
 /// via glob matching. Otherwise it is treated as a literal directory path.
@@ -295,18 +326,23 @@ fn find_built_executables(
     cargo_data: &Value,
     profile: BuildProfile,
     extra_names: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<BuiltBinary>> {
     let profile_dir = rust_base_dir.join("target").join(profile.artifact_dir());
-    let mut candidate_names: HashSet<String> = HashSet::new();
+    // Map base name -> package version (first writer wins for duplicate names).
+    let mut candidates: HashMap<String, Option<String>> = HashMap::new();
 
-    // Root package (if any)
+    // Root package (if any). The root manifest is its own workspace root.
+    let root_version = package_version(cargo_data, cargo_data);
     for name in manifest_bin_names(cargo_data) {
-        candidate_names.insert(name);
+        candidates.entry(name).or_insert_with(|| root_version.clone());
     }
 
-    // Add extra names (e.g., from tauri.conf.json productName)
+    // Add extra names (e.g., from tauri.conf.json productName); these belong to
+    // the root (src-tauri) package, so they share its version.
     for name in extra_names {
-        candidate_names.insert(name.clone());
+        candidates
+            .entry(name.clone())
+            .or_insert_with(|| root_version.clone());
     }
 
     // Workspace members (if any). Member entries may contain glob patterns
@@ -328,23 +364,29 @@ fn find_built_executables(
                 let Ok(member_data) = toml::from_str::<Value>(&contents) else {
                     continue;
                 };
+                let member_version = package_version(&member_data, cargo_data);
                 for name in manifest_bin_names(&member_data) {
-                    candidate_names.insert(name);
+                    candidates
+                        .entry(name)
+                        .or_insert_with(|| member_version.clone());
                 }
             }
         }
     }
 
-    if candidate_names.is_empty() {
+    if candidates.is_empty() {
         anyhow::bail!("No packages or bins found in Cargo.toml");
     }
 
     // Filter to only candidates with existing executables for the selected profile
     let mut built_executables = Vec::new();
-    for base in candidate_names {
+    for (base, version) in candidates {
         let exe_name = exe_filename(&base);
         if profile_dir.join(&exe_name).exists() {
-            built_executables.push(base);
+            built_executables.push(BuiltBinary {
+                base_name: base,
+                version,
+            });
         }
     }
     Ok(built_executables)
@@ -631,8 +673,14 @@ pub fn run_with_options(
 
     let source_dir = rust_base_dir.join("target").join(profile.artifact_dir());
 
-    for package_name in built_executables {
-        let exe_name = exe_filename(&package_name);
+    for binary in built_executables {
+        let exe_name = exe_filename(&binary.base_name);
+        // Dimmed " v<version>" suffix for log lines, or empty when unknown.
+        let ver_suffix = binary
+            .version
+            .as_deref()
+            .map(|v| format!(" {}", format!("v{}", v).dimmed()))
+            .unwrap_or_default();
 
         let source_path = source_dir.join(&exe_name);
         let target_path = target_dir.join(&exe_name);
@@ -643,9 +691,10 @@ pub fn run_with_options(
             if emit_text {
                 writeln!(
                     ctx.stdout,
-                    "{} {} {}",
+                    "{} {}{} {}",
                     "Deferred".bold().cyan(),
                     exe_name.bold().cyan(),
+                    ver_suffix,
                     "(self-update will be attempted after other copies)".dimmed()
                 )?;
             }
@@ -663,9 +712,10 @@ pub fn run_with_options(
                         .unwrap_or("unknown");
                     writeln!(
                         ctx.stdout,
-                        "{} {} {} {}",
+                        "{} {}{} {} {}",
                         "Copied".bold().green(),
                         exe_name.bold().green(),
+                        ver_suffix,
                         format!("-> {}", target_path.display()).dimmed(),
                         format!("({})", mtime_str).dimmed()
                     )?;
@@ -684,9 +734,10 @@ pub fn run_with_options(
                 if emit_text {
                     writeln!(
                         ctx.stderr,
-                        "{} {} {}",
+                        "{} {}{} {}",
                         "Failed".bold().bright_red(),
                         exe_name.bold().yellow(),
+                        ver_suffix,
                         format!("-> {}: {}", target_path.display(), e).dimmed()
                     )?;
                 }
@@ -993,6 +1044,71 @@ mod tests {
         assert!(names.contains(&"other".to_string()));
         assert!(names.contains(&"pkg".to_string()));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn test_package_version_literal() {
+        let val: Value = toml::from_str(
+            r#"
+            [package]
+            name = "pkg"
+            version = "1.2.3"
+        "#,
+        )
+        .unwrap();
+        // Manifest is its own workspace root here.
+        assert_eq!(package_version(&val, &val), Some("1.2.3".to_string()));
+    }
+
+    #[test]
+    fn test_package_version_workspace_inheritance() {
+        let root: Value = toml::from_str(
+            r#"
+            [workspace]
+            members = ["crates/a"]
+
+            [workspace.package]
+            version = "4.5.6"
+        "#,
+        )
+        .unwrap();
+        let member: Value = toml::from_str(
+            r#"
+            [package]
+            name = "a"
+            version.workspace = true
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            package_version(&member, &root),
+            Some("4.5.6".to_string()),
+            "version.workspace = true should resolve from [workspace.package]"
+        );
+    }
+
+    #[test]
+    fn test_package_version_absent() {
+        // No [package] table, and no [workspace.package] to inherit from.
+        let val: Value = toml::from_str(
+            r#"
+            [workspace]
+            members = ["crates/a"]
+        "#,
+        )
+        .unwrap();
+        assert_eq!(package_version(&val, &val), None);
+
+        // version.workspace = true but the root provides no workspace version.
+        let member: Value = toml::from_str(
+            r#"
+            [package]
+            name = "a"
+            version.workspace = true
+        "#,
+        )
+        .unwrap();
+        assert_eq!(package_version(&member, &val), None);
     }
 
     #[test]
