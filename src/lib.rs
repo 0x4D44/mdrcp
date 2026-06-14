@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use toml::Value;
 
-const UPDATER_TEMP_NAME: &str = "mdrcp_updater.exe";
+// NOTE: must not contain "update"/"setup"/"install"/"patch" — those keywords
+// trigger Windows UAC Installer Detection on unmanifested binaries, forcing an
+// elevation prompt (os error 740) when spawning. We also embed an asInvoker
+// manifest (see build.rs) as the authoritative fix.
+const UPDATER_TEMP_NAME: &str = "mdrcp_swap.exe";
 
 pub mod cli;
 
