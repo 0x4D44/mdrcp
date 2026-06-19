@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Key Operations
 1. **Validation**: Checks for existence of `Cargo.toml` in target directory
-2. **Package Discovery**: Parses `Cargo.toml` to extract package name
+2. **Binary Discovery**: Collects every binary target Cargo builds (workspace-aware) — `[[bin]]` entries, the package-named `src/main.rs`, and `src/bin/*.rs` / `src/bin/<name>/main.rs` autobins — then keeps the ones present in `target/<profile>/`
 3. **Binary Location**: Constructs the path to the selected build profile's executable (handles Windows `.exe` extension)
 4. **Directory Creation**: Creates `c:\apps` if it doesn't exist
 5. **File Copy**: Copies executables from `target/<profile>/` to `c:\apps` (or the path in `MD_TARGET_DIR` when set)

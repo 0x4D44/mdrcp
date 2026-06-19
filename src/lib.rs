@@ -106,7 +106,8 @@ const TARGET_OVERRIDE_ENV: &str = "MD_TARGET_DIR";
 fn format_file_mtime(path: &Path) -> Option<String> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     let datetime = time::OffsetDateTime::from(modified);
-    let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+    let fmt =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
     datetime.format(fmt).ok()
 }
 
@@ -318,6 +319,42 @@ fn expand_workspace_member(base: &Path, pattern: &str) -> Vec<PathBuf> {
     }
 }
 
+/// Cargo **autobin** names for a package directory: the file stem of each
+/// `src/bin/*.rs`, plus the directory name of each `src/bin/<name>/main.rs`.
+///
+/// These are the binaries Cargo builds *without* any explicit `[[bin]]` entry, so
+/// a crate that relies on autobins (no `[[bin]]` table — e.g. deltic's
+/// `delticw`/`deltic-read`) still has every front door discovered. The
+/// package-named `src/main.rs` bin is already covered by `manifest_bin_names`'
+/// package-name fallback, so it is intentionally not added here.
+///
+/// Over-inclusion is harmless: `find_built_executables` keeps only names that
+/// actually exist in `target/<profile>/`, so an autobin suppressed by an explicit
+/// `[[bin]]` (or by `autobins = false`) is simply dropped when it was not built.
+fn autobin_names(pkg_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir(pkg_dir.join("src").join("bin")) else {
+        return names; // no src/bin/ — nothing to add
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // src/bin/<name>/main.rs -> a bin named <name>
+            if path.join("main.rs").is_file() {
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            // src/bin/<stem>.rs -> a bin named <stem>
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Find all built executables from workspace members or single package.
 /// Returns the base names of executables (without `.exe`).
 /// `rust_base_dir` is the directory containing Cargo.toml and target/.
@@ -333,8 +370,13 @@ fn find_built_executables(
 
     // Root package (if any). The root manifest is its own workspace root.
     let root_version = package_version(cargo_data, cargo_data);
-    for name in manifest_bin_names(cargo_data) {
-        candidates.entry(name).or_insert_with(|| root_version.clone());
+    for name in manifest_bin_names(cargo_data)
+        .into_iter()
+        .chain(autobin_names(rust_base_dir))
+    {
+        candidates
+            .entry(name)
+            .or_insert_with(|| root_version.clone());
     }
 
     // Add extra names (e.g., from tauri.conf.json productName); these belong to
@@ -365,7 +407,10 @@ fn find_built_executables(
                     continue;
                 };
                 let member_version = package_version(&member_data, cargo_data);
-                for name in manifest_bin_names(&member_data) {
+                for name in manifest_bin_names(&member_data)
+                    .into_iter()
+                    .chain(autobin_names(&member_dir))
+                {
                     candidates
                         .entry(name)
                         .or_insert_with(|| member_version.clone());
@@ -707,9 +752,7 @@ pub fn run_with_options(
         match fs::copy(&source_path, &target_path) {
             Ok(_) => {
                 if emit_text {
-                    let mtime_str = source_mtime
-                        .as_deref()
-                        .unwrap_or("unknown");
+                    let mtime_str = source_mtime.as_deref().unwrap_or("unknown");
                     writeln!(
                         ctx.stdout,
                         "{} {}{} {} {}",
@@ -1121,6 +1164,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No packages or bins found"));
+    }
+
+    #[test]
+    fn test_autobin_names_scans_files_and_subdir_mains() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("src").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("delticw.rs"), "fn main() {}").unwrap();
+        std::fs::write(bin.join("deltic-read.rs"), "fn main() {}").unwrap();
+        // A subdirectory bin: src/bin/sub/main.rs -> "sub".
+        std::fs::create_dir_all(bin.join("sub")).unwrap();
+        std::fs::write(bin.join("sub").join("main.rs"), "fn main() {}").unwrap();
+        // Ignored: a non-.rs file, and a subdir without main.rs.
+        std::fs::write(bin.join("notes.md"), "x").unwrap();
+        std::fs::create_dir_all(bin.join("emptydir")).unwrap();
+
+        let mut names = autobin_names(temp.path());
+        names.sort();
+        assert_eq!(names, vec!["deltic-read", "delticw", "sub"]);
+    }
+
+    #[test]
+    fn test_autobin_names_absent_src_bin_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+        // No src/bin/ directory at all -> the package-named bin is handled by the
+        // manifest_bin_names fallback, not autobin_names.
+        assert!(autobin_names(temp.path()).is_empty());
     }
 
     #[test]

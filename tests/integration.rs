@@ -544,7 +544,10 @@ fn test_workspace_glob_members() {
     run_with_options(temp_dir.path(), &options, &mut ctx).unwrap();
 
     let stdout = String::from_utf8(stdout).unwrap();
-    assert!(stdout.contains("alpha"), "expected alpha in output: {stdout}");
+    assert!(
+        stdout.contains("alpha"),
+        "expected alpha in output: {stdout}"
+    );
     assert!(stdout.contains("beta"), "expected beta in output: {stdout}");
 }
 
@@ -678,6 +681,58 @@ fn test_run_with_target_override_relative_path() {
 
     let expected_target = temp_project.path().join(override_dir).join(exe);
     assert!(expected_target.exists());
+}
+
+#[test]
+fn test_autobin_src_bin_is_deployed() {
+    // A package that declares NO [[bin]] and relies on Cargo autobins: src/main.rs
+    // (the package-named bin) plus src/bin/helper.rs (an autobin). Before the
+    // autobin scan, only the package-named bin was discovered, so helper.exe was
+    // silently left behind — the deltic delticw.exe bug this change fixes.
+    let temp_project = tempdir().unwrap();
+    create_and_write_file(
+        &temp_project.path().join("Cargo.toml"),
+        "[package]\nname=\"pkg\"\nversion=\"0.1.0\"",
+    )
+    .unwrap();
+    let src = temp_project.path().join("src");
+    fs::create_dir_all(src.join("bin")).unwrap();
+    create_and_write_file(&src.join("main.rs"), "fn main() {}").unwrap();
+    create_and_write_file(&src.join("bin").join("helper.rs"), "fn main() {}").unwrap();
+    // A second autobin that is NOT built (e.g. suppressed by autobins=false or an
+    // explicit [[bin]]). The existence-filter must drop it — this is the
+    // self-correcting property that makes the autobin scan safe to over-include.
+    create_and_write_file(&src.join("bin").join("notbuilt.rs"), "fn main() {}").unwrap();
+
+    // Only pkg and helper are "built".
+    let rel = temp_project.path().join("target").join("release");
+    fs::create_dir_all(&rel).unwrap();
+    create_and_write_file(&rel.join(exe_filename("pkg")), "x").unwrap();
+    create_and_write_file(&rel.join(exe_filename("helper")), "x").unwrap();
+
+    let override_dir = PathBuf::from("dist");
+    let options = RunOptions {
+        target_override: Some(override_dir.clone()),
+        ..Default::default()
+    };
+    let mut stdout = std::io::sink();
+    let mut stderr = std::io::sink();
+    let mut ctx = mdrcp::CliContext::new(&mut stdout, &mut stderr);
+    run_with_options(temp_project.path(), &options, &mut ctx).unwrap();
+
+    let out_dir = temp_project.path().join(&override_dir);
+    assert!(
+        out_dir.join(exe_filename("pkg")).exists(),
+        "package-named bin should deploy"
+    );
+    assert!(
+        out_dir.join(exe_filename("helper")).exists(),
+        "src/bin autobin should deploy"
+    );
+    assert!(
+        !out_dir.join(exe_filename("notbuilt")).exists(),
+        "an autobin with no built artifact must be dropped by the existence-filter"
+    );
 }
 
 #[test]

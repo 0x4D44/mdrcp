@@ -17,7 +17,7 @@ cargo build --release
 mdrcp
 ```
 
-The tool detects built executables for the selected profile (workspace aware), copies them to the target directory, and prints colorized status.
+The tool detects built executables for the selected profile (workspace aware), copies them to the target directory, and prints colorized status. Discovery covers every binary Cargo builds: explicit `[[bin]]` targets, the package-named `src/main.rs`, and `src/bin/*.rs` (and `src/bin/<name>/main.rs`) **autobins** — so a crate that declares no `[[bin]]` still gets all of its binaries deployed. Only names that actually exist in `target/<profile>/` are copied.
 
 ## Flags
 
