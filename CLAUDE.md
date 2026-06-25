@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`mdrcp` is a Rust command-line deployment tool that automates copying built executables from Rust projects to a system-wide applications directory (`c:\apps`). It reads the package/workspace metadata from `Cargo.toml` and copies the corresponding binaries from `target/release/` by default or from `target/debug/` when the `--debug` flag is supplied. You can override the default install location (useful for CI/tests) by setting the `MD_TARGET_DIR` environment variable.
+`mdrcp` is a Rust command-line deployment tool that automates copying built executables from Rust projects to a platform-specific applications directory: `c:\apps` on Windows and `~/.local/bin` (resolved from `$HOME`) on macOS/Linux. It reads the package/workspace metadata from `Cargo.toml` and copies the corresponding binaries from `target/release/` by default or from `target/debug/` when the `--debug` flag is supplied. You can override the default install location (useful for CI/tests) by setting the `MD_TARGET_DIR` environment variable.
 
 ## Build Commands
 
@@ -27,8 +27,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **Validation**: Checks for existence of `Cargo.toml` in target directory
 2. **Binary Discovery**: Collects every binary target Cargo builds (workspace-aware) — `[[bin]]` entries, the package-named `src/main.rs`, and `src/bin/*.rs` / `src/bin/<name>/main.rs` autobins — then keeps the ones present in `target/<profile>/`
 3. **Binary Location**: Constructs the path to the selected build profile's executable (handles Windows `.exe` extension)
-4. **Directory Creation**: Creates `c:\apps` if it doesn't exist
-5. **File Copy**: Copies executables from `target/<profile>/` to `c:\apps` (or the path in `MD_TARGET_DIR` when set)
+4. **Directory Creation**: Creates the target directory (`c:\apps` on Windows, `~/.local/bin` on macOS/Linux) if it doesn't exist
+5. **File Copy**: Copies executables from `target/<profile>/` to the target directory (or the path in `MD_TARGET_DIR` when set)
 
 ### Testing Strategy
 - **Unit Tests**: Located in `src/main.rs:63-118`
@@ -47,4 +47,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Usage Pattern
 
-This tool is designed to be run in the root directory of any Rust project after building with `cargo build --release` (or `cargo build` if you plan to pass `--debug`). It automatically detects the project name and deploys the executable to a centralized location.
+This tool is designed to be run in the root directory of any Rust project after building with `cargo build --release` (or `cargo build` if you plan to pass `--debug`). It automatically detects the project name and deploys the executable to the platform-specific install directory (`c:\apps` on Windows, `~/.local/bin` on macOS/Linux), overridable via `MD_TARGET_DIR`.
+
+The platform-specific default lives in `default_target_dir()` (`src/lib.rs`), which is `#[cfg(windows)]` / `#[cfg(not(windows))]` gated.
